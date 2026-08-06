@@ -1,0 +1,11 @@
+name: Docs
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  docs:
+    uses: gojiplus/py-canon/.github/workflows/reusable-docs.yml@v1

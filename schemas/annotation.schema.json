@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:breakingnews:schema:annotation",
+  "title": "Annotation",
+  "description": "Ground-truth story boundaries for one transcript. JSONL: one object per line, UTF-8. Joined to a transcript by `record_id`. Note that an annotation carries no text -- only offsets -- which is what makes an annotation set distributable when the underlying transcripts are licensed.",
+  "type": "object",
+  "required": [
+    "record_id",
+    "breaks",
+    "word_count"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "record_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Must match a transcript's `record_id`. An annotation with no matching transcript is a hard error.",
+      "examples": [
+        "12791924207105a2"
+      ]
+    },
+    "breaks": {
+      "type": "array",
+      "description": "Word offsets at which a NEW story begins, i.e. the index in `body.split()` of the first word of the new story. Ascending, unique, and strictly interior: every offset must satisfy 0 < b < word_count. Offset 0 is not a boundary -- every document starts a story -- and neither is word_count. An empty array is meaningful and common: 306 of the 998 training transcripts contain no boundary at all.",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true,
+      "examples": [
+        [
+          909,
+          1333,
+          2351,
+          2537,
+          2915
+        ],
+        []
+      ]
+    },
+    "word_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Must equal the matching transcript's `word_count`. This is the guard that catches an annotation made against a different revision of the text -- the single most damaging silent error in this pipeline."
+    },
+    "category": {
+      "enum": [
+        "A",
+        "C"
+      ],
+      "description": "`A` = the transcript contains at least one boundary. `C` = clean, no boundary. Redundant with `breaks` by construction (A iff breaks is non-empty) and retained because the training set routes the two categories differently. Training corpus: 692 A, 306 C."
+    },
+    "outlet": {
+      "type": "string",
+      "description": "Copied from the transcript for convenience; the transcript is authoritative."
+    },
+    "show": {
+      "type": "string",
+      "description": "Copied from the transcript for convenience; the transcript is authoritative."
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Copied from the transcript for convenience; the transcript is authoritative."
+    },
+    "agent_notes": {
+      "type": "string",
+      "description": "Free-text rationale from the annotator. Never read by training or inference; kept for adjudication and for auditing granularity disagreements."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "category": {
+            "const": "C"
+          }
+        },
+        "required": [
+          "category"
+        ]
+      },
+      "then": {
+        "properties": {
+          "breaks": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "category": {
+            "const": "A"
+          }
+        },
+        "required": [
+          "category"
+        ]
+      },
+      "then": {
+        "properties": {
+          "breaks": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

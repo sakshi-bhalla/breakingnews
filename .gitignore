@@ -1,0 +1,9 @@
+# Replaced by the py-canon template when `preen new` runs.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/

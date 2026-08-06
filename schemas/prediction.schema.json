@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:breakingnews:schema:prediction",
+  "title": "Prediction",
+  "description": "What `breakingnews run` emits: one object per document. Deliberately the same offset convention as an annotation, so a prediction file and a gold file can be scored against each other without conversion.",
+  "type": "object",
+  "required": [
+    "record_id",
+    "word_count",
+    "pred_breaks"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "record_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Copied from the input transcript."
+    },
+    "word_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Length of the transcript this was predicted from, in words. Lets a consumer verify the prediction was made against the same text they hold."
+    },
+    "pred_breaks": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true,
+      "description": "Predicted word offsets of new-story starts, ascending, after guard filtering and cross-window deduplication. Same convention as an annotation's `breaks`."
+    },
+    "tau": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Threshold applied to P(\"1\") to produce `pred_breaks`. Recorded so a prediction file is self-describing."
+    },
+    "n_unlocatable_anchors": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Anchors the model emitted that could not be grounded back to a word offset in their window. Counted, never silently dropped: a rising count means the model is paraphrasing rather than quoting, which is a failure mode worth seeing."
+    },
+    "n_ambiguous_anchors": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Anchors whose pre-context matched at more than one position in the window. Resolved to the first match by default. Reported because the rate has never been measured; 12 pre-context words are unique for 99.93% of annotated breaks, so it should be near zero."
+    },
+    "outlet": {
+      "type": "string",
+      "description": "Passed through from the input, if present."
+    },
+    "show": {
+      "type": "string",
+      "description": "Passed through from the input, if present."
+    },
+    "date": {
+      "type": "string",
+      "description": "Passed through from the input, if present."
+    }
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:breakingnews:schema:segment",
+  "title": "Segment",
+  "description": "One story cut out of one broadcast: what `breakingnews segments` emits and what `breakingnews merge` consumes. Rows are the analysis unit downstream; `record_id` is carried on every row so a result can always be rolled back up to the broadcast that produced it. Character spans are contiguous and gapless across a record, which is what makes the merge byte-exact.",
+  "type": "object",
+  "required": [
+    "segment_id",
+    "record_id",
+    "index",
+    "word_start",
+    "word_end",
+    "char_start",
+    "char_end",
+    "n_words"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "segment_id": {
+      "type": "string",
+      "pattern": "^.+#\\d+$",
+      "description": "`{record_id}#{index:03d}`. Stable across re-runs as long as the number of segments in the record does not change. It deliberately encodes no offset: predicted offsets are not bit-reproducible across batch sizes (LIMITATIONS L1b), so an offset-derived or content-hashed id would churn on a re-run that found exactly the same stories. What an ordinal id does NOT survive is a re-segmentation with a different segment count, which renumbers everything after the change -- reconcile two runs on `record_id` plus `word_start`, not on this.",
+      "examples": [
+        "12791924207105a2#000",
+        "12791924207105a2#003"
+      ]
+    },
+    "record_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The parent broadcast, carried verbatim. Provenance never requires parsing `segment_id`.",
+      "examples": [
+        "12791924207105a2"
+      ]
+    },
+    "index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Position within the broadcast, from 0. Contiguous: a record with N segments has indices 0..N-1 with none missing."
+    },
+    "word_start": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "First word offset, inclusive, into `body.split()`. Segment 0 always starts at 0."
+    },
+    "word_end": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Last word offset, exclusive. The final segment's `word_end` equals the record's `word_count`."
+    },
+    "char_start": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "First character offset, inclusive, into the original `body`. Segment 0 always starts at 0, so leading whitespace is not lost."
+    },
+    "char_end": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Last character offset, exclusive. Equals the next segment's `char_start`, and for the final segment equals `len(body)`. This gaplessness is what makes concatenation reproduce the source byte-for-byte."
+    },
+    "n_words": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "`word_end - word_start`."
+    },
+    "text": {
+      "type": "string",
+      "description": "The exact substring `body[char_start:char_end]`, including the whitespace separating this segment from the next -- that is what makes the merge lossless. Strip it for display or analysis. Omitted entirely when segments are built with `include_text=False`, which is how to publish segment offsets for a licensed corpus without redistributing its text; the merge is then unavailable."
+    },
+    "flags": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "short",
+          "empty"
+        ]
+      },
+      "description": "Advisory markers, never a record of removal -- segmentation drops nothing. `short` means below the caller's `--min-words`; `empty` means zero words. Discarding flagged rows is an explicit, separate step (`drop_flagged`), and once rows are dropped the remainder is no longer a gapless cover, so the merge will refuse it.",
+      "examples": [
+        [],
+        [
+          "short"
+        ]
+      ]
+    },
+    "outlet": {
+      "type": "string",
+      "description": "Passed through from the transcript, if present."
+    },
+    "show": {
+      "type": "string",
+      "description": "Passed through from the transcript, if present."
+    },
+    "date": {
+      "type": "string",
+      "description": "Passed through from the transcript, if present."
+    }
+  }
+}
