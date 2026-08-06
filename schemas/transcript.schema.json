@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:breakingnews:schema:transcript",
+  "title": "Transcript",
+  "description": "One broadcast transcript. JSONL: one object per line, UTF-8. The `body` is the unit of analysis -- every word offset anywhere in this project indexes into `body.split()`, so the whitespace tokenisation of this field is load-bearing and must not be normalised after annotation.",
+  "type": "object",
+  "required": [
+    "record_id",
+    "body",
+    "word_count"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "record_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable unique id. Joins a transcript to its annotation and to predictions. Must be unique within a file.",
+      "examples": [
+        "3f7d7b3d9ea1c60f"
+      ]
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The full transcript as one string. Word offsets are indices into `body.split()`, so any change to whitespace invalidates every annotation and prediction for this record."
+    },
+    "word_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Must equal `len(body.split())` exactly. Checked at load; a mismatch is a hard error, not a warning, because it silently shifts every offset."
+    },
+    "outlet": {
+      "type": "string",
+      "description": "Broadcaster. Free text; the training corpus used CNN, FOX, MSNBC, ABC, CBS.",
+      "examples": [
+        "CNN"
+      ]
+    },
+    "show": {
+      "type": "string",
+      "description": "Programme name.",
+      "examples": [
+        "CNN ERIN BURNETT OUTFRONT"
+      ]
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Broadcast date, ISO 8601.",
+      "examples": [
+        "2012-09-21"
+      ]
+    },
+    "year": {
+      "type": "integer",
+      "description": "Convenience duplicate of the year in `date`."
+    },
+    "month": {
+      "type": "string",
+      "pattern": "^\\d{2}$",
+      "description": "Convenience duplicate of the month in `date`, zero-padded."
+    },
+    "type": {
+      "enum": [
+        "dump",
+        "segment"
+      ],
+      "description": "`dump` is a whole broadcast containing several stories -- what this model is for. `segment` is a transcript that already covers a single story; the training corpus held 159 of these against 841 dumps."
+    }
+  }
+}

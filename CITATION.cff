@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+title: "breakingnews: story segmentation for broadcast-news transcripts"
+message: "If you use this software, please cite it and read LIMITATIONS.md before quoting any accuracy figure."
+type: software
+authors:
+  - family-names: Bhalla
+    given-names: Sakshi
+license: MIT
+abstract: >-
+  A LoRA adapter on Llama-3.1-8B-Instruct that locates the word offsets where
+  one story ends and the next begins in a broadcast-news transcript, plus the
+  scoring metrics and the segment/merge round trip. Boundaries only: it does not
+  label, classify or summarise the resulting segments. Validation F1 0.596 at a
+  +/-25-word tolerance on 117 transcripts and 322 boundaries; precision is a
+  lower bound rather than an estimate, and every result is single-seed.
+keywords:
+  - text segmentation
+  - broadcast news
+  - content analysis
+  - LoRA
