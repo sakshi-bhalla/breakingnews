@@ -6,6 +6,7 @@
     breakingnews score --predictions preds.jsonl --gold annotations.jsonl
     breakingnews segments --transcripts t.jsonl --predictions p.jsonl --out s.jsonl
     breakingnews merge --segments s.jsonl --out rebuilt.jsonl
+    breakingnews reconcile --old old.jsonl --new new.jsonl
 
 Only `run` and `sweep` need the `[gpu]` extra and a GPU with at least 24 GB.
 Everything else is pure Python -- including `segments` and `merge`, which are
@@ -23,7 +24,15 @@ from pathlib import Path
 from .config import DEFAULT_TAU, DecodeSpec
 from .loading import resolve_adapter, verify_adapter
 from .metrics import DEFAULT_TOLERANCE_WORDS, pk_and_windowdiff, score_documents
-from .segments import drop_flagged, group_by_record, merge_segments, to_segments
+from .segments import (
+    STABLE_STATUSES,
+    drop_flagged,
+    group_by_record,
+    id_map,
+    merge_segments,
+    reconcile,
+    to_segments,
+)
 
 TOLERANCES = (25, 50, 100)
 
@@ -50,15 +59,26 @@ def _load_segmenter(args: argparse.Namespace):
     Returns:
         A ready `Segmenter`.
     """
-    try:
-        from .segmenter import Segmenter
-    except ImportError as exc:  # pragma: no cover - depends on install extras
+    # segmenter.py imports torch inside function bodies, so importing it here
+    # always succeeds and the extras guard never fired -- torch's absence
+    # surfaced later as a raw traceback. Probe the real dependency instead.
+    import importlib.util
+
+    absent = [
+        m
+        for m in ("torch", "transformers", "peft", "safetensors")
+        if importlib.util.find_spec(m) is None
+    ]
+    if absent:  # pragma: no cover - depends on install extras
         sys.exit(
-            f"this command needs the inference extra: pip install "
-            f"'breakingnews[gpu]'  ({exc})"
+            f"`{args.command}` needs the inference extra; missing: "
+            f"{', '.join(absent)}.\n  pip install 'breakingnews[gpu]'"
         )
+    from .segmenter import Segmenter
+
     return Segmenter.from_pretrained(
         args.adapter,
+        revision=args.revision,
         base_model=args.base_model,
         decode=DecodeSpec(gen_batch_size=args.batch_size),
     )
@@ -73,9 +93,22 @@ def cmd_check_adapter(args: argparse.Namespace) -> int:
     Returns:
         0 when the adapter is sound, 1 otherwise.
     """
-    adapter_dir = resolve_adapter(args.adapter)
+    adapter_dir = resolve_adapter(args.adapter, revision=args.revision)
     problems = verify_adapter(adapter_dir)
     print(f"adapter: {adapter_dir}")
+    try:
+        from .config import Geometry, PromptSpec
+
+        g = Geometry.from_adapter(adapter_dir)
+        pspec = PromptSpec.from_adapter(adapter_dir)
+        print(
+            f"  geometry: window {g.window_tokens} / stride {g.stride_tokens} / "
+            f"guard {g.edge_guard_lo}\n"
+            f"  anchors : {pspec.anchor_pre_words} pre / "
+            f"{pspec.anchor_post_words} post"
+        )
+    except FileNotFoundError:
+        pass
     if not problems:
         print("OK -- no problems found")
         return 0
@@ -100,11 +133,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     seg = _load_segmenter(args)
 
     written = 0
+    lost: list[str] = []
     with args.out.open("w", encoding="utf-8") as f:
         # Chunked so a large corpus does not build one giant window pool.
         for start in range(0, len(docs), args.chunk):
             chunk = docs[start : start + args.chunk]
-            scored = seg.score_windows([d["body"] for d in chunk])
+            # A chunk is generated as one batch, so a GPU failure takes the whole
+            # chunk. Losing it must not also end the run: the remaining chunks
+            # are independent, and the reconciliation below reports exactly which
+            # records are absent rather than leaving a short file that parses.
+            try:
+                scored = seg.score_windows([d["body"] for d in chunk])
+            except Exception as exc:
+                lost.extend(d["record_id"] for d in chunk)
+                print(
+                    f"  chunk {start}-{start + len(chunk)} FAILED ({exc}); "
+                    f"{len(chunk)} record(s) lost",
+                    flush=True,
+                )
+                continue
             for d, per_doc in zip(chunk, scored, strict=True):
                 f.write(
                     json.dumps(
@@ -115,6 +162,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                             "word_count": len(d["body"].split()),
                             "pred_breaks": seg.apply_threshold(per_doc, tau=args.tau),
                             "tau": args.tau,
+                            "adapter": str(args.adapter),
+                            "adapter_revision": args.revision,
                             "n_unlocatable_anchors": sum(
                                 s.unlocatable for s in per_doc
                             ),
@@ -125,7 +174,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
                 written += 1
             print(f"  {written}/{len(docs)} documents", flush=True)
-    print(f"wrote {args.out}")
+
+    # Records in must equal records out. Stated, checked, and non-zero on
+    # failure -- a short output file that parses is the failure that looks
+    # like success.
+    print(f"\n{len(docs)} records in, {written} out  ({args.out})")
+    if written != len(docs):
+        print(f"{len(lost)} record(s) ABSENT from the output:")
+        for rid in lost[:10]:
+            print(f"  - {rid}")
+        if len(lost) > 10:
+            print(f"  ... and {len(lost) - 10} more")
+        return 1
     return 0
 
 
@@ -147,7 +207,14 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     gold_by_id = {a["record_id"]: sorted(a["breaks"]) for a in _read_jsonl(args.gold)}
     docs = [d for d in docs if d["record_id"] in gold_by_id]
     if not docs:
-        sys.exit("no documents in --input have gold annotations in --gold")
+        sys.exit(
+            f"no record_id in --input appears in --gold.\n"
+            f"  --input has {len(_read_jsonl(args.input))} record(s), "
+            f"e.g. {[d['record_id'] for d in _read_jsonl(args.input)[:3]]}\n"
+            f"  --gold has {len(gold_by_id)} record(s), "
+            f"e.g. {sorted(gold_by_id)[:3]}\n"
+            "  The two files must use the same record_id values."
+        )
 
     seg = _load_segmenter(args)
     scored = seg.score_windows([d["body"] for d in docs])
@@ -179,7 +246,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     print(f"\nbest F1 {best[1].f1:.4f} at tau {best[0]:.3f}")
     print(
         "note: on a saturated, bimodal model this curve is expected to be flat. "
-        "A wide plateau is not a tuning opportunity -- see LIMITATIONS.md C7."
+        "A wide plateau is not a tuning opportunity."
     )
     if args.out:
         args.out.write_text(
@@ -197,25 +264,82 @@ def cmd_score(args: argparse.Namespace) -> int:
         args: Parsed arguments.
 
     Returns:
-        0.
+        0 normally; 2 when gold documents are absent from the prediction file
+        and --allow-missing was not given.
     """
     preds = _read_jsonl(args.predictions)
-    gold_by_id = {a["record_id"]: sorted(a["breaks"]) for a in _read_jsonl(args.gold)}
+    gold_rows = _read_jsonl(args.gold)
+    gold_by_id = {a["record_id"]: sorted(a["breaks"]) for a in gold_rows}
+    pred_by_id = {p["record_id"]: p for p in preds}
 
-    paired = [
-        (p, gold_by_id[p["record_id"]]) for p in preds if p["record_id"] in gold_by_id
+    # THE GOLD SET DEFINES THE DENOMINATOR, NOT THE PREDICTION FILE.
+    #
+    # Iterating predictions and keeping those with gold silently drops every
+    # gold document that has no prediction row -- so its misses leave the
+    # denominator and the score goes UP. Measured: dropping half a corpus moved
+    # F1 from 0.667 to 1.000, exit 0, no warning. The asymmetry made it worse,
+    # because the opposite direction (predictions without gold) did print a
+    # note, so silence here read as "checked and clean".
+    #
+    # An absent document is scored as zero predictions: all of its gold counts
+    # as misses, which is what it actually is.
+    expected = [a["record_id"] for a in gold_rows]
+    absent = [rid for rid in expected if rid not in pred_by_id]
+    orphans = [p["record_id"] for p in preds if p["record_id"] not in gold_by_id]
+
+    if not set(expected) & set(pred_by_id):
+        sys.exit(
+            f"no record_id in --predictions appears in --gold.\n"
+            f"  --predictions has {len(preds)} record(s), "
+            f"e.g. {[p['record_id'] for p in preds[:3]]}\n"
+            f"  --gold has {len(gold_by_id)} record(s), e.g. {expected[:3]}\n"
+            "  The two files must use the same record_id values."
+        )
+    if orphans:
+        print(f"note: {len(orphans)} prediction(s) have no gold; skipped")
+    if absent:
+        at_stake = sum(len(gold_by_id[rid]) for rid in absent)
+        print(
+            f"\n[ERROR] {len(absent)} of {len(expected)} gold documents are ABSENT "
+            f"from the\n        prediction file, holding {at_stake} gold breaks. "
+            "They are scored as zero\n        predictions (all misses)."
+        )
+        for rid in absent[:10]:
+            print(f"          - {rid}")
+        if len(absent) > 10:
+            print(f"          ... and {len(absent) - 10} more")
+        if not args.allow_missing:
+            print("\n        Pass --allow-missing to score a partial file anyway.")
+            return 2
+
+    # Gold and predictions must describe the same text.
+    gold_wc = {a["record_id"]: a["word_count"] for a in gold_rows if "word_count" in a}
+    drift = [
+        f"{rid}: prediction {pred_by_id[rid]['word_count']} words, gold {gold_wc[rid]}"
+        for rid in expected
+        if rid in pred_by_id
+        and rid in gold_wc
+        and "word_count" in pred_by_id[rid]
+        and pred_by_id[rid]["word_count"] != gold_wc[rid]
     ]
-    if not paired:
-        sys.exit("no record_id in --predictions appears in --gold")
-    if len(paired) < len(preds):
-        print(f"note: {len(preds) - len(paired)} predictions have no gold; skipped")
+    if drift:
+        sys.exit(
+            f"{len(drift)} record(s) scored against different text:\n  "
+            + "\n  ".join(drift[:10])
+            + "\nEvery offset would be shifted; the score would be meaningless."
+        )
 
-    pred = [p["pred_breaks"] for p, _ in paired]
-    gold = [g for _, g in paired]
-    n_words = [p["word_count"] for p, _ in paired]
+    gold = [gold_by_id[rid] for rid in expected]
+    pred = [pred_by_id.get(rid, {}).get("pred_breaks", []) for rid in expected]
+    n_words = [
+        pred_by_id[rid]["word_count"]
+        if rid in pred_by_id and "word_count" in pred_by_id[rid]
+        else gold_wc.get(rid, 0)
+        for rid in expected
+    ]
 
     print(
-        f"\n{len(paired)} documents, {sum(len(g) for g in gold)} gold boundaries, "
+        f"\n{len(expected)} documents, {sum(len(g) for g in gold)} gold boundaries, "
         f"{sum(len(p) for p in pred)} predicted\n"
     )
     print(f"{'tolerance':>10}{'tp':>5}{'fn':>5}{'fp':>5}{'P':>8}{'R':>8}{'F1':>9}")
@@ -238,7 +362,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         )
 
     print(
-        "\nPrecision is a LOWER BOUND (LIMITATIONS.md C1): many scored false "
+        "\nPrecision is a LOWER BOUND: many scored false "
         "positives\nare real topic changes grouped into one thematic block. Do not "
         "compute a\nderived statistic that treats a false positive as clean error."
     )
@@ -261,26 +385,74 @@ def cmd_segments(args: argparse.Namespace) -> int:
     if missing:
         sys.exit(f"{len(missing)} prediction(s) have no transcript, e.g. {missing[:3]}")
 
+    # Every offset indexes body.split(). A prediction made against a different
+    # revision of the transcript still joins on record_id and still produces
+    # segments -- just silently mis-cut ones, with every story starting in the
+    # wrong place. The schemas call this the single most damaging silent error
+    # in the pipeline; until now only validate_data.py checked it, and only for
+    # annotations.
+    # A transcript with a missing or non-string body is a per-RECORD problem,
+    # handled in the loop below so the rest of the corpus still gets written.
+    # Dereferencing it here would abort the whole run with nothing written --
+    # which is exactly the failure the per-record handler exists to prevent,
+    # reintroduced one guard earlier.
+    drift = [
+        f"{p['record_id']}: prediction says {p['word_count']} words, "
+        f"transcript has {len(bodies[p['record_id']]['body'].split())}"
+        for p in preds
+        if "word_count" in p
+        and isinstance(bodies[p["record_id"]].get("body"), str)
+        and p["word_count"] != len(bodies[p["record_id"]]["body"].split())
+    ]
+    if drift:
+        sys.exit(
+            f"{len(drift)} prediction(s) were made against different text:\n  "
+            + "\n  ".join(drift[:10])
+            + "\nEvery offset would be shifted. Re-run `breakingnews run` "
+            "against these transcripts."
+        )
+
     n_seg = n_flagged = 0
+    failures: list[str] = []
     carry = ("outlet", "show", "date")
+    minimal = ("record_id", "segment_id", "text", "n_cuts")
     with args.out.open("w", encoding="utf-8") as f:
         for p in preds:
             rec = bodies[p["record_id"]]
-            segs = to_segments(
-                p["record_id"],
-                rec["body"],
-                p["pred_breaks"],
-                min_words=args.min_words,
-                include_text=not args.no_text,
-            )
+            if not isinstance(rec.get("body"), str):
+                failures.append(
+                    f"{p['record_id']}: transcript has no usable `body` "
+                    f"(got {type(rec.get('body')).__name__})"
+                )
+                continue
+            # One unusable record must not kill a corpus run and leave a file
+            # that is short but perfectly valid JSON -- the failure mode that
+            # looks like success.
+            try:
+                segs = to_segments(
+                    p["record_id"],
+                    rec["body"],
+                    p["pred_breaks"],
+                    min_words=args.min_words,
+                    include_text=not args.no_text,
+                )
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                # ValueError alone was too narrow: JSON Schema accepts 50.0 as
+                # an integer, and a float offset raises TypeError deep in the
+                # slicing, killing the corpus run instead of skipping one record.
+                failures.append(f"{p['record_id']}: {type(exc).__name__}: {exc}")
+                continue
             for seg in segs:
                 row = seg.to_dict(include_text=not args.no_text)
                 row.update({k: rec[k] for k in carry if k in rec})
+                if args.minimal:
+                    row = {k: row[k] for k in minimal if k in row}
                 f.write(json.dumps(row) + "\n")
             n_seg += len(segs)
             n_flagged += sum(1 for s in segs if s.flags)
 
-    print(f"{len(preds)} records -> {n_seg} segments  ({args.out})")
+    ok = len(preds) - len(failures)
+    print(f"{ok} of {len(preds)} records -> {n_seg} segments  ({args.out})")
     if args.min_words:
         print(
             f"{n_flagged} flagged below {args.min_words} words. Flagged, not "
@@ -288,6 +460,22 @@ def cmd_segments(args: argparse.Namespace) -> int:
         )
     if args.no_text:
         print("text omitted: offsets only, so `merge` cannot rebuild from these")
+    if args.minimal:
+        print(
+            "minimal columns: record_id, segment_id, text, n_cuts. Offsets are "
+            "dropped,\nso `merge` and `reconcile` cannot read this file -- keep a "
+            "full copy if you\nwill need either."
+        )
+    if failures:
+        print(
+            f"\n{len(failures)} record(s) produced no segments and are ABSENT "
+            f"from {args.out}:"
+        )
+        for msg in failures[:10]:
+            print(f"  - {msg}")
+        if len(failures) > 10:
+            print(f"  ... and {len(failures) - 10} more")
+        return 1
     return 0
 
 
@@ -306,26 +494,25 @@ def cmd_merge(args: argparse.Namespace) -> int:
     from .segments import Segment
 
     rows = _read_jsonl(args.segments)
-    segs = [
-        Segment(
-            segment_id=r["segment_id"],
-            record_id=r["record_id"],
-            index=r["index"],
-            word_start=r["word_start"],
-            word_end=r["word_end"],
-            char_start=r["char_start"],
-            char_end=r["char_end"],
-            n_words=r["n_words"],
-            text=r.get("text", ""),
-            flags=tuple(r.get("flags", ())),
-        )
-        for r in rows
-    ]
+    try:
+        segs = [Segment.from_dict(r) for r in rows]
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+    # Record the input universe BEFORE dropping. Without this, a record whose
+    # segments are ALL flagged simply has no group after the drop, so it never
+    # reaches the loop below, never lands in `failures`, and vanishes from the
+    # output with exit 0. The bias is not random: a short single-story broadcast
+    # is ONE segment, so a single `short` flag deletes the whole record, and
+    # those are precisely the records most likely to be flagged.
+    records_in = set(group_by_record(segs))
 
     if args.drop_flagged:
         kept, dropped = drop_flagged(segs)
         print(f"dropped {len(dropped)} flagged segments; the rest is not a cover")
         segs = kept
+
+    vanished = sorted(records_in - set(group_by_record(segs)))
 
     failures = []
     with args.out.open("w", encoding="utf-8") as f:
@@ -348,13 +535,85 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     print(
         f"{len(rows)} segments -> {len(rows) and len(group_by_record(segs))} "
-        f"records ({args.out})"
+        f"records ({args.out}); {len(records_in)} record(s) in"
     )
+    if vanished:
+        print(
+            f"\n{len(vanished)} record(s) had EVERY segment dropped and are "
+            f"ABSENT from {args.out}:"
+        )
+        for rid in vanished[:10]:
+            print(f"  - {rid}")
+        if len(vanished) > 10:
+            print(f"  ... and {len(vanished) - 10} more")
+        print(
+            "  These are whole records, not segments. Short single-story "
+            "broadcasts are\n  the most likely to be lost this way, so the "
+            "survivors are a biased sample."
+        )
     if failures:
         print(f"\n{len(failures)} record(s) could not be rebuilt:")
         for msg in failures[:10]:
             print(f"  - {msg}")
-        return 1
+    return 1 if (failures or vanished) else 0
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    """Map segment ids from one run onto another.
+
+    `segment_id` is an ordinal, so joining two runs on it is unsafe: one extra
+    boundary renumbers everything after it. This pairs segments by shared text.
+
+    Args:
+        args: Parsed arguments.
+
+    Returns:
+        0.
+    """
+    from .segments import Segment
+
+    def load(path: Path) -> list[Segment]:
+        return [Segment.from_dict(r) for r in _read_jsonl(path)]
+
+    old, new = load(args.old), load(args.new)
+    pairs = reconcile(old, new, min_overlap=args.min_overlap)
+
+    counts: dict[str, int] = {}
+    for c in pairs:
+        counts[c.status] = counts.get(c.status, 0) + 1
+    print(f"\n{len(old)} old segments, {len(new)} new\n")
+    for status in ("same", "moved", "split", "merged", "added", "removed"):
+        if counts.get(status):
+            print(f"  {status:>8}  {counts[status]}")
+
+    # Only one-to-one pairings: on a split or merged row `start_shift` is the
+    # distance from the host segment's start, not how far a boundary moved, so
+    # pooling them would report a meaningless maximum.
+    shifts = [
+        abs(c.start_shift)
+        for c in pairs
+        if c.start_shift and c.status in STABLE_STATUSES
+    ]
+    if shifts:
+        print(
+            f"\nboundary shifts among one-to-one pairs: {len(shifts)} nonzero, "
+            f"max {max(shifts)} words"
+        )
+
+    mapping = id_map(pairs)
+    unstable = len(old) - len(mapping)
+    print(
+        f"\n{len(mapping)} of {len(old)} old ids map one-to-one; {unstable} do not. "
+        "split/merged\nsegments are excluded on purpose -- they have no single "
+        "successor, and picking\none would quietly corrupt any result carried "
+        "across the two runs."
+    )
+
+    if args.out:
+        with args.out.open("w", encoding="utf-8") as f:
+            for c in pairs:
+                f.write(json.dumps(c.__dict__) + "\n")
+        print(f"wrote {args.out}")
     return 0
 
 
@@ -370,11 +629,18 @@ def build_parser() -> argparse.ArgumentParser:
     def add_model_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("adapter", help="local adapter directory or Hub repo id")
         p.add_argument("--base-model", default=None, dest="base_model")
+        p.add_argument(
+            "--revision",
+            default=None,
+            help="pin the adapter to a Hub tag or commit; unpinned means main, "
+            "which moves",
+        )
         p.add_argument("--batch-size", type=int, default=8, dest="batch_size")
         p.add_argument("--limit", type=int, default=None)
 
     p = sub.add_parser("check-adapter", help="check an adapter for silent failures")
     p.add_argument("adapter")
+    p.add_argument("--revision", default=None)
     p.set_defaults(func=cmd_check_adapter)
 
     p = sub.add_parser("run", help="segment a corpus")
@@ -415,6 +681,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="no_text",
         help="emit offsets only, for a corpus whose text cannot be redistributed",
     )
+    p.add_argument(
+        "--minimal",
+        action="store_true",
+        help="emit only record_id, segment_id, text and n_cuts; drops the "
+        "offsets that `merge` and `reconcile` need",
+    )
     p.set_defaults(func=cmd_segments)
 
     p = sub.add_parser("merge", help="reassemble segments into whole documents")
@@ -428,9 +700,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_merge)
 
+    p = sub.add_parser("reconcile", help="map segment ids between two runs")
+    p.add_argument("--old", type=Path, required=True)
+    p.add_argument("--new", type=Path, required=True)
+    p.add_argument("--out", type=Path, default=None)
+    p.add_argument(
+        "--min-overlap",
+        type=float,
+        default=0.5,
+        dest="min_overlap",
+        help="shared-text fraction required to call two segments the same story",
+    )
+    p.set_defaults(func=cmd_reconcile)
+
     p = sub.add_parser("score", help="score predictions against gold (no GPU)")
     p.add_argument("--predictions", type=Path, required=True)
     p.add_argument("--gold", type=Path, required=True)
+    p.add_argument(
+        "--allow-missing",
+        action="store_true",
+        dest="allow_missing",
+        help="score a partial prediction file anyway; absent gold documents are "
+        "still counted as all-misses, and the error is still printed",
+    )
     p.set_defaults(func=cmd_score)
 
     return ap

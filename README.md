@@ -1,85 +1,82 @@
 # breakingnews
 
-Story segmentation for broadcast-news transcripts. A LoRA adapter on
-Llama-3.1-8B-Instruct that takes a raw transcript and returns the word offsets
-where one story ends and the next begins.
-
-A transcript arrives as an undifferentiated block of 2,000–17,000 words covering
-several unrelated stories. The task is to mark where the broadcast moves to a
-**genuinely different story** — new topic, new event, different actors — and not
-at changes of speaker, correspondent, location or sub-angle within a continuing
-story. That distinction is the entire difficulty.
-
-Boundaries only. Nothing here labels, classifies or summarises the resulting
-segments.
+**Purpose.** A broadcast-news transcript arrives as an undifferentiated block of 2,000–17,000 words covering several unrelated stories. This package finds the word offsets where one story ends and the next begins, turns them into one row per story, and lets you put the rows back together again. It exists because content analysis needs a comparable unit: a television transcript is not one article, and treating it as one — or splitting it on speaker turns — gives the wrong denominator. A "boundary" means the broadcast moves to a **genuinely different story**: new topic, new event, different actors, and explicitly *not* a change of speaker, correspondent, location or sub-angle within a continuing story. Boundaries only — nothing here labels, classifies or summarises the segments it produces.
 
 ## Install
 
 ```bash
-pip install breakingnews          # scoring + post-processing, pure Python
-pip install "breakingnews[gpu]"   # + torch/transformers/peft for inference
+pip install breakingnews          # scoring, segments, merge, reconcile
+pip install "breakingnews[gpu]"   # + torch/transformers/peft, for inference
 ```
 
-The base install has no heavy dependencies and gives you the metrics
-(`score_documents`, `match`, `prf`, `pk_and_windowdiff`, the two baselines),
-segment/span construction, and `breakingnews score` — enough to evaluate a
-prediction file on a laptop.
+The base install is pure Python. Inference needs the `[gpu]` extra and a GPU with at least 24 GB; the adapter is fetched from the Hugging Face Hub on first use and cached, and the Llama-3.1-8B base is a further ~16 GB download. Built with Llama.
 
-Inference needs the `[gpu]` extra and a GPU with ≥24 GB. The adapter is fetched
-from the Hugging Face Hub on first use and cached.
-
-## Use
-
-```python
-from breakingnews import Segmenter
-
-seg = Segmenter.from_pretrained("OWNER/breakingnews-v4-hard")
-breaks = seg.segment(transcript)  # -> [909, 1333, 2351, ...]
-stories = seg.segment_spans(transcript)  # -> [(0, 909), (909, 1333), ...]
-```
-
-From the command line:
+## The workflow
 
 ```bash
-breakingnews check-adapter OWNER/breakingnews-v4-hard
-breakingnews run   OWNER/breakingnews-v4-hard --input transcripts.jsonl --out preds.jsonl
-breakingnews sweep OWNER/breakingnews-v4-hard --input transcripts.jsonl --gold gold.jsonl
-breakingnews score --predictions preds.jsonl --gold gold.jsonl   # no GPU
+# 1. Confirm the adapter is intact before trusting anything it produces.
+breakingnews check-adapter sakshib3/breakingnews --revision v1
+
+# 2. Transcripts -> boundaries.
+breakingnews run sakshib3/breakingnews --revision v1 \
+    --input transcripts.jsonl --out predictions.jsonl
+
+# 3. Boundaries -> one row per story.
+breakingnews segments --transcripts transcripts.jsonl \
+    --predictions predictions.jsonl --out segments.jsonl --min-words 100
+
+# 4. Rows -> whole documents again, byte for byte.
+breakingnews merge --segments segments.jsonl --out rebuilt.jsonl
 ```
 
-## From boundaries to rows, and back
+Two more commands help once you have output:
 
-Boundaries are offsets; analysis usually wants one row per story. The expansion
-carries provenance and is reversible:
+1. **`score`** compares a prediction file against your own gold annotations and reports precision, recall, F1 at three tolerances, plus Pk and WindowDiff. Every gold document counts, so a prediction file that is missing records is reported rather than quietly scoring higher.
+2. **`reconcile`** maps segment ids from one run onto another by how much text they share, and tells you which ids carried over unchanged, which moved, and which were split or merged.
 
 ```bash
-breakingnews segments --transcripts t.jsonl --predictions p.jsonl --out s.jsonl
-breakingnews merge    --segments s.jsonl --out rebuilt.jsonl
+breakingnews score --predictions predictions.jsonl --gold annotations.jsonl
+breakingnews reconcile --old run_a.jsonl --new run_b.jsonl
 ```
+
+Everything except `run` and `sweep` works without a GPU.
+
+### In Python
 
 ```python
-from breakingnews import to_segments, merge_segments
+from breakingnews import Segmenter, to_segments, merge_segments
 
-segs = to_segments(record_id, body, breaks, min_words=100)
-segs[1].segment_id  # '12791924207105a2#001'
-segs[1].record_id  # '12791924207105a2'  -- provenance, always a field
-segs[1].clean_text  # the story text
-
-merge_segments(segs) == (record_id, body)  # byte-for-byte, whitespace included
+seg = Segmenter.from_pretrained("sakshib3/breakingnews", revision="v1")
+breaks = seg.segment(transcript)  # [909, 1333, 2351, ...]
+rows = to_segments(record_id, transcript, breaks, min_words=100)
+merge_segments(rows) == (record_id, transcript)  # byte for byte
 ```
 
-`segment_id` is an ordinal rather than an offset or a content hash, because
-offsets are not bit-reproducible across batch sizes (L1b) — an ordinal survives
-a re-run that finds the same stories, though not one that finds a different
-*number* of them. `--min-words` flags short segments; it never drops them.
+Pin `revision`. Unpinned resolves to `main`, which moves.
 
-Offsets are indices into `transcript.split()`. See
-[`schemas/`](schemas/) for the JSONL formats.
+## What you get
 
-## Results — `V4_hard`
+One row per story. `--minimal` emits just the first four fields; offsets index `transcript.split()`, and [`schemas/`](schemas/) documents all four JSONL formats.
 
-Trained on 998 annotated transcripts (2,829 boundaries). τ = 0.010, selected on
-validation and applied unchanged to the held-out test set.
+| field | |
+|---|---|
+| `record_id` | the parent broadcast, on every row |
+| `segment_id` | `{record_id}#{index:03d}` |
+| `text` | the story |
+| `n_cuts` | boundaries found in the parent record; `0` means it was never cut |
+| `word_start` `word_end` `char_start` `char_end` `n_words` | offsets |
+
+Three properties the package holds to:
+
+- **Segmentation is a partition.** Every character lands in exactly one story, so `merge` reproduces the source byte for byte and refuses rather than guesses when it cannot.
+- **Nothing is dropped silently.** `--min-words` *flags* short segments; a record that fails is named and the command exits non-zero.
+- **Provenance survives.** `record_id` is a field on every row, never something you parse out of an id.
+
+Re-running can shift a boundary by a few words, because batched bf16 generation is not bit-reproducible, so **join two runs with `reconcile`, never on `segment_id`** — that renumbers whenever a run finds a different number of stories.
+
+## Accuracy
+
+**τ (tau) is the decision threshold.** For every window the model emits a probability that a story boundary is present in it; τ is the cut-off above which that window's boundaries are kept. τ = 0.010 here, selected on validation and applied unchanged to the held-out test set.
 
 | split | docs | boundaries | tolerance | precision | recall | **F1** |
 |---|---:|---:|---:|---:|---:|---:|
@@ -88,71 +85,18 @@ validation and applied unchanged to the held-out test set.
 | test | 20 | 64 | ±25 w | 0.593 | 0.797 | 0.680 |
 | test | 20 | 64 | ±100 w | 0.663 | 0.891 | 0.760 |
 
-> **Quote the validation row.** It rests on 322 gold breaks against the test
-> split's 64.
->
-> **C2 — the test split is too small to carry a headline.** At n=64 the
-> binomial standard error on recall alone is ≈0.05, putting test F1 0.680 at
-> roughly **±0.07** before any other source of variation. The val→test rise is
-> not evidence of generalisation; test recall is 0.797 against val's 0.621,
-> which says the test transcripts have easier breaks.
->
-> **C1 — precision is a lower bound, not an estimate.** A large share of scored
-> false positives are *real* topic changes the annotator chose to group into one
-> thematic block. 216 such cases are still awaiting adjudication. True precision
-> is somewhere above 0.573 and nobody yet knows where. Never compute a derived
-> statistic that treats a false positive as clean error.
+> Quote the validation row: it rests on 322 boundaries against the test split's 64, where the standard error on recall alone is ≈0.05. **Precision is a lower bound, not an estimate** — many scored false positives are real topic changes grouped into one thematic block, so do not compute a derived statistic that treats a false positive as clean error.
 
-Baselines on the same test set: predicting no boundaries scores F1 0.000;
-predicting N boundaries at uniform spacing scores 0.062.
+A prediction counts as correct if it lands within N words of a true boundary: ±25 asks "to within a sentence?", ±100 asks "did it find the seam at all?". Baselines on the same test set are 0.000 for predicting nothing and 0.062 for predicting N boundaries at uniform spacing.
 
-**On the two tolerances.** A prediction counts as correct if it lands within N
-words of a true boundary. Widening N does not change the model, it changes the
-question: ±25 asks "to within a sentence?", ±100 asks "did it find the seam at
-all?". Mean offset on matched boundaries is 15.1 words even when scored inside a
-100-word window — the extra matches are close, not sloppy. **±25 is the
-default.**
+**τ is not a tuning knob.** The confidences are saturated and bimodal — 49% of validation windows above 0.5, 38% below 0.001 — so any value in roughly [0.005, 0.5] gives the same answer, and it exists only to exclude τ = 0, where every window fires. This geometry has no high-precision regime: it cannot exceed precision 0.564 at any threshold, so if your use is sensitive to false boundaries the fix is a different geometry, not a different threshold.
 
-## τ is not a tuning knob
+**Where it is unmeasured.** US broadcast news, five outlets, one annotator, no inter-annotator agreement, single seed. Behaviour on print, other outlets, other languages or non-news speech is not "probably fine" — it is unmeasured. If your domain differs, build a gold set ([`schemas/`](schemas/)) and measure.
 
-The confidences are saturated and bimodal: 49% of validation windows sit above
-0.5, 38% below 0.001, p25 = 0.000 and p75 = 0.996. The entire 500× sweep of τ
-moves 12% of windows; F1 across that whole range spans 0.589–0.602. For this
-window geometry, greedy and thresholded F1 are **identical** at 0.6250.
+## Training
 
-τ exists to exclude τ = 0, where every window fires. It is not a precision/recall
-dial, and per **C7** this geometry has no high-precision regime at all —
-`V2_w3072` cannot exceed precision 0.564 at any threshold. If your use is
-sensitive to false boundaries, the fix is a different geometry, not a different
-threshold.
-
-*(The "+0.28 F1 from thresholding" figure that circulates for this project —
-greedy 0.3291 → 0.6131 — belongs to `V2_w2048`, a different geometry. It does
-not describe this model.)*
-
-## Read this before citing a number
-
-**[LIMITATIONS.md](LIMITATIONS.md)** — all eleven caveats. Every result here is
-single-seed (C3), differences below 0.03 F1 are not distinguishable (C4), and
-the domain is US broadcast news labelled by one annotator with no
-inter-annotator agreement (C8, C9).
-
-## Training data
-
-Not included. The transcripts are licensed source material.
-
-| | |
-|---|---|
-| transcripts | 1,000 sampled US TV news broadcasts, **998 annotated** |
-| period | September 1992 – November 2020 |
-| outlets | CNN 585 · FOX 200 · MSNBC 117 · ABC 76 · CBS 20 |
-| labels | **2,829 story boundaries**, as word offsets |
-| density | median 2 per transcript, max 18; **306 transcripts have none** |
-
-Annotations are word offsets carrying no text, and are available for review on
-request. To train on your own corpus, see [`schemas/`](schemas/) and
-[`scripts/model-training/`](scripts/model-training/).
+Trained on 998 annotated transcripts containing 2,829 boundaries, sampled from US TV news broadcasts 1992–2020 (CNN, FOX, MSNBC, ABC, CBS). The transcripts are licensed and are not distributed; the annotations are word offsets carrying no text, available for review on request. To train on your own corpus, see [`schemas/`](schemas/) for the input formats and [`scripts/model-training/`](scripts/model-training/) for the procedure.
 
 ## License
 
-MIT.
+The package is MIT. The model is a LoRA adapter on Llama-3.1-8B-Instruct and is governed by the Llama 3.1 Community License, whose terms pass through to anyone using the weights. Built with Llama.

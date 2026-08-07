@@ -50,9 +50,9 @@ class Segment:
 
             Stable across re-runs *as long as the number of segments does not
             change*. It deliberately does not encode an offset: predicted
-            offsets are not bit-reproducible across batch sizes (LIMITATIONS
-            L1b), so an offset-derived or content-hashed id would churn on a
-            re-run that found the same stories. An id built from the ordinal
+            offsets are not bit-reproducible across batch sizes, so an
+            offset-derived or content-hashed id would churn on a re-run that
+            found the same stories. An id built from the ordinal
             survives that. What it does not survive is a re-segmentation that
             finds a different *count* -- then everything after the change
             renumbers. Join on `record_id` plus `word_start` if you need to
@@ -65,6 +65,16 @@ class Segment:
         char_start: First character offset, inclusive, into `body`.
         char_end: Last character offset, exclusive.
         n_words: `word_end - word_start`.
+        n_cuts: How many boundaries were found in the **parent record**, not in
+            this segment. Constant across a record's rows and equal to
+            `n_segments - 1`, so 0 means the broadcast was never cut.
+
+            Denormalised onto every row on purpose: it is the field that lets a
+            segment-level table be filtered or weighted by how fragmented its
+            source broadcast was, without a join back to the predictions. A
+            record with 0 cuts is a whole broadcast wearing a segment's
+            clothing, and treating it as one story alongside genuine segments
+            is the mistake this field exists to make visible.
         text: The exact substring `body[char_start:char_end]`. Includes the
             whitespace that separates this segment from the next, which is what
             makes concatenation lossless; use `clean_text` for display.
@@ -80,6 +90,7 @@ class Segment:
     char_start: int
     char_end: int
     n_words: int
+    n_cuts: int
     text: str = field(repr=False)
     flags: tuple[str, ...] = ()
 
@@ -108,6 +119,51 @@ class Segment:
         if not include_text:
             d.pop("text")
         return d
+
+    @classmethod
+    def from_dict(cls, row: dict) -> Segment:
+        """Rebuild a segment from a JSONL row.
+
+        Every reader goes through here rather than hand-rolling the field
+        list, so a new field cannot be missed by one caller and not another.
+
+        Args:
+            row: A decoded segment row.
+
+        Returns:
+            The segment.
+
+        Raises:
+            ValueError: If the row carries no offsets. That is what `--minimal`
+                output looks like, and the bare KeyError it would otherwise
+                raise names a field rather than the cause.
+        """
+        missing = [
+            k
+            for k in ("index", "word_start", "word_end", "char_start", "char_end")
+            if k not in row
+        ]
+        if missing:
+            msg = (
+                f"segment {row.get('segment_id', '?')} has no {missing} -- this "
+                "looks like `--minimal` output, which drops the offsets that "
+                "merge and reconcile need. Re-run `breakingnews segments` "
+                "without --minimal."
+            )
+            raise ValueError(msg)
+        return cls(
+            segment_id=row["segment_id"],
+            record_id=row["record_id"],
+            index=row["index"],
+            word_start=row["word_start"],
+            word_end=row["word_end"],
+            char_start=row["char_start"],
+            char_end=row["char_end"],
+            n_words=row["n_words"],
+            n_cuts=row.get("n_cuts", 0),
+            text=row.get("text", ""),
+            flags=tuple(row.get("flags", ())),
+        )
 
 
 def make_segment_id(record_id: str, index: int) -> str:
@@ -151,7 +207,10 @@ def parse_segment_id(segment_id: str) -> tuple[str, int]:
     """
     m = SEGMENT_ID_PATTERN.match(segment_id)
     if not m:
-        msg = f"not a segment id: {segment_id!r}"
+        msg = (
+            f"not a segment id: {segment_id!r}. Expected "
+            f"'{{record_id}}{SEGMENT_ID_SEPARATOR}{{index}}', e.g. 'abc123#000'."
+        )
         raise ValueError(msg)
     return m["record_id"], int(m["index"])
 
@@ -218,6 +277,7 @@ def to_segments(
 
     starts = word_char_starts(body)
     edges = [0, *cut, n_words]
+    n_cuts = len(cut)
 
     out: list[Segment] = []
     for i, (w0, w1) in enumerate(pairwise(edges)):
@@ -244,6 +304,7 @@ def to_segments(
                 char_start=c0,
                 char_end=c1,
                 n_words=length,
+                n_cuts=n_cuts,
                 text=body[c0:c1] if include_text else "",
                 flags=tuple(flags),
             )
@@ -265,7 +326,8 @@ def merge_segments(segments: Sequence[Segment]) -> tuple[str, str]:
 
     Raises:
         ValueError: If the segments are empty, span more than one `record_id`,
-            carry no text, or do not form a gapless cover. Each of those would
+            carry no text, carry text whose length disagrees with its own
+            character span, or do not form a gapless cover. Each of those would
             produce a plausible-looking but wrong document, so none is repaired
             silently.
     """
@@ -296,6 +358,17 @@ def merge_segments(segments: Sequence[Segment]) -> tuple[str, str]:
 
     cursor = 0
     for s in ordered:
+        # Byte-exactness is the whole contract, and offsets alone do not
+        # establish it: text that was stripped or rewritten downstream still
+        # forms a gapless cover, and joining it silently glues words together.
+        if s.text and len(s.text) != s.char_end - s.char_start:
+            msg = (
+                f"{record_id}: segment {s.index} carries {len(s.text)} characters "
+                f"but its span is {s.char_end - s.char_start}. The text was "
+                "modified after extraction (stripped?), so the merge cannot be "
+                "exact."
+            )
+            raise ValueError(msg)
         if s.char_start != cursor:
             msg = (
                 f"{record_id}: segment {s.index} starts at char {s.char_start}, "
@@ -345,3 +418,256 @@ def drop_flagged(
     for s in segments:
         (dropped if wanted & set(s.flags) else kept).append(s)
     return kept, dropped
+
+
+# --- Reconciling two runs ------------------------------------------------------
+STATUS_SAME = "same"
+STATUS_MOVED = "moved"
+STATUS_SPLIT = "split"
+STATUS_MERGED = "merged"
+STATUS_ADDED = "added"
+STATUS_REMOVED = "removed"
+
+STABLE_STATUSES = (STATUS_SAME, STATUS_MOVED)
+"""Statuses whose `old_id -> new_id` mapping is unambiguously one-to-one."""
+
+
+@dataclass(frozen=True)
+class Correspondence:
+    """How one segment in an old run relates to one in a new run.
+
+    Attributes:
+        record_id: The broadcast both sides belong to.
+        status: One of `same` (identical span), `moved` (same story, shifted
+            boundary), `split` (the old segment became this one and at least one
+            other), `merged` (this new segment absorbed more than one old),
+            `added` (genuinely new text with no old counterpart), `removed`
+            (old text with no new counterpart).
+
+            A segment absorbed by a merge is reported as `merged` pointing at
+            the segment that absorbed it, not as `removed` -- it did not vanish,
+            it changed owner. `added` and `removed` therefore mean what they
+            say, which matters when the counts are used to decide whether a
+            re-run is safe to adopt.
+        old_id: `segment_id` in the old run, or None when `added`.
+        new_id: `segment_id` in the new run, or None when `removed`.
+        overlap: Jaccard overlap of the two word ranges, 0.0 to 1.0.
+        start_shift: `new.word_start - old.word_start`, or None when there is
+            no counterpart at all.
+
+            Read it as "how far the boundary moved" only for `same` and
+            `moved`. On a `split` or `merged` row the two segments are not the
+            same span, so it is the distance to the segment that absorbed this
+            one -- pooling those into a shift statistic produces a meaningless
+            maximum. A few words of movement means nothing.
+    """
+
+    record_id: str
+    status: str
+    old_id: str | None
+    new_id: str | None
+    overlap: float
+    start_shift: int | None
+
+
+def _overlap(a: Segment, b: Segment) -> tuple[int, float]:
+    """Word-range intersection and Jaccard overlap of two segments.
+
+    Args:
+        a: One segment.
+        b: The other.
+
+    Returns:
+        An `(intersection_words, jaccard)` pair.
+    """
+    inter = max(0, min(a.word_end, b.word_end) - max(a.word_start, b.word_start))
+    union = a.n_words + b.n_words - inter
+    if union:
+        return inter, inter / union
+    # Both segments are zero-length -- an empty-body record, which the package
+    # emits rather than drops. Jaccard is 0/0 there; returning 0.0 would make
+    # such a segment unpairable forever, so it would be reported as BOTH split
+    # and merged against itself. Identical empty spans are identical.
+    same = (a.word_start, a.word_end) == (b.word_start, b.word_end)
+    return 0, (1.0 if same else 0.0)
+
+
+def reconcile(
+    old: Iterable[Segment],
+    new: Iterable[Segment],
+    *,
+    min_overlap: float = 0.5,
+    min_fragment: float = 0.5,
+) -> list[Correspondence]:
+    """Map segments from one run onto segments from another.
+
+    `segment_id` is an ordinal, so it is *not* safe to join two runs on it: a
+    re-segmentation that finds one extra boundary renumbers everything after it,
+    and boundaries can shift by a few words even when the same stories are
+    found. This pairs segments by how much text they actually share, which
+    survives both.
+
+    Segments are paired one-to-one, highest overlap first, within each
+    `record_id`. A pair is reported as `split` or `merged` when a third segment
+    also covers a real share of the same text, so a caller can see that the
+    correspondence is not one-to-one rather than inferring it from a shift.
+
+    Args:
+        old: Segments from the earlier run.
+        new: Segments from the later run.
+        min_overlap: Jaccard overlap two segments must share to be paired at
+            all. The default treats "shares more than half its extent" as the
+            same story.
+        min_fragment: Share of a *third* segment that must lie inside the
+            paired counterpart before the correspondence is called `split` or
+            `merged` rather than `moved`.
+
+            Measured against the third segment's own length, not the pair's.
+            That is the discriminator: in a real split the extra segment is
+            mostly *contained* in the old one, whereas a boundary that merely
+            shifted spills only the few words it moved by. Measuring against
+            the pair instead makes any one-word shift look like a merge.
+
+    Returns:
+        One `Correspondence` per pairing plus one for every unpaired segment on
+        each side, so nothing is dropped. An unpaired segment that still sits
+        inside one on the other side is reported as `merged` or `split` with a
+        pointer to it, rather than as `added`/`removed`.
+    """
+    old_by_record = group_by_record(old)
+    new_by_record = group_by_record(new)
+
+    out: list[Correspondence] = []
+    for record_id in sorted(old_by_record.keys() | new_by_record.keys()):
+        olds = old_by_record.get(record_id, [])
+        news = new_by_record.get(record_id, [])
+
+        # Every candidate pair, best overlap first -- the same global
+        # nearest-first discipline `metrics.match` uses, for the same reason:
+        # walking one side in order gives different pairings.
+        candidates = sorted(
+            (
+                (-_overlap(o, n)[1], oi, ni)
+                for oi, o in enumerate(olds)
+                for ni, n in enumerate(news)
+                if _overlap(o, n)[1] >= min_overlap
+            ),
+        )
+        used_o: set[int] = set()
+        used_n: set[int] = set()
+        pairs: list[tuple[int, int, float]] = []
+        for neg_j, oi, ni in candidates:
+            if oi in used_o or ni in used_n:
+                continue
+            used_o.add(oi)
+            used_n.add(ni)
+            pairs.append((oi, ni, -neg_j))
+
+        for oi, ni, jaccard in sorted(pairs):
+            o, n = olds[oi], news[ni]
+            # A third segment covering a real share of the same text means the
+            # correspondence is not one-to-one, whatever the shift says.
+            # A third segment counts only if most of *it* sits inside the
+            # counterpart. A shifted boundary spills only as many words as it
+            # moved, which must not read as a structural change.
+            split = any(
+                other.n_words and _overlap(o, other)[0] >= min_fragment * other.n_words
+                for j, other in enumerate(news)
+                if j != ni
+            )
+            merged = any(
+                other.n_words and _overlap(other, n)[0] >= min_fragment * other.n_words
+                for j, other in enumerate(olds)
+                if j != oi
+            )
+            if split:
+                status = STATUS_SPLIT
+            elif merged:
+                status = STATUS_MERGED
+            elif (o.word_start, o.word_end) == (n.word_start, n.word_end):
+                status = STATUS_SAME
+            else:
+                status = STATUS_MOVED
+            out.append(
+                Correspondence(
+                    record_id=record_id,
+                    status=status,
+                    old_id=o.segment_id,
+                    new_id=n.segment_id,
+                    overlap=jaccard,
+                    start_shift=n.word_start - o.word_start,
+                )
+            )
+
+        # An unpaired segment that nonetheless sits inside one on the other
+        # side was absorbed, not lost. Reporting it as `removed` would say text
+        # disappeared when it only changed owner -- so it is reported as the
+        # losing side of a merge (or split), and keeps a pointer to where it
+        # went. `added`/`removed` are then reserved for text with no
+        # counterpart at all.
+        for oi, o in enumerate(olds):
+            if oi in used_o:
+                continue
+            host = max(
+                (
+                    x
+                    for x in news
+                    if o.n_words and _overlap(o, x)[0] >= min_fragment * o.n_words
+                ),
+                key=lambda x: _overlap(o, x)[0],
+                default=None,
+            )
+            out.append(
+                Correspondence(
+                    record_id,
+                    STATUS_MERGED if host else STATUS_REMOVED,
+                    o.segment_id,
+                    host.segment_id if host else None,
+                    _overlap(o, host)[1] if host else 0.0,
+                    host.word_start - o.word_start if host else None,
+                )
+            )
+
+        for ni, n in enumerate(news):
+            if ni in used_n:
+                continue
+            host = max(
+                (
+                    x
+                    for x in olds
+                    if n.n_words and _overlap(x, n)[0] >= min_fragment * n.n_words
+                ),
+                key=lambda x: _overlap(x, n)[0],
+                default=None,
+            )
+            out.append(
+                Correspondence(
+                    record_id,
+                    STATUS_SPLIT if host else STATUS_ADDED,
+                    host.segment_id if host else None,
+                    n.segment_id,
+                    _overlap(host, n)[1] if host else 0.0,
+                    n.word_start - host.word_start if host else None,
+                )
+            )
+    return out
+
+
+def id_map(correspondences: Iterable[Correspondence]) -> dict[str, str]:
+    """Build an `old_id -> new_id` lookup for the unambiguous correspondences.
+
+    Only `same` and `moved` are included. A `split` or `merged` segment has no
+    single successor, and silently picking one would quietly corrupt any
+    analysis carried across the two runs -- inspect those cases yourself.
+
+    Args:
+        correspondences: Output of `reconcile`.
+
+    Returns:
+        A mapping covering only the one-to-one pairings.
+    """
+    return {
+        c.old_id: c.new_id
+        for c in correspondences
+        if c.status in STABLE_STATUSES and c.old_id and c.new_id
+    }

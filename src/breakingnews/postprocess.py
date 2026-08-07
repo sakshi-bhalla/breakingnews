@@ -1,7 +1,6 @@
 """Guard-zone filtering and cross-window deduplication.
 
 Two required steps between localising an anchor and reporting a boundary.
-Ported from `infer.in_guard_zone` / `infer.dedupe`.
 """
 
 from __future__ import annotations
@@ -42,6 +41,39 @@ def in_guard_zone(
     if not is_first_window and local_word < margin:
         return True
     return bool(not is_last_window and local_word > n_words - margin)
+
+
+def is_degenerate_boundary(
+    local_word: int,
+    n_words: int,
+    *,
+    is_first_window: bool,
+    is_last_window: bool,
+) -> bool:
+    """Whether a localised anchor names a boundary that cannot exist.
+
+    Word 0 is not a boundary -- every document already starts a story -- and
+    the offset past the final word is not one either. Neither is reachable in
+    the middle of a document, because there `word_start` is positive and the
+    window has a neighbour. They are reachable only at a document's first and
+    last window, where `in_guard_zone` deliberately does not apply its edge
+    band, so nothing else would stop them.
+
+    Left in, they reach `to_segments`, which rejects them -- turning a rare
+    model quirk into an exception partway through a corpus run.
+
+    Args:
+        local_word: Offset within the window.
+        n_words: Window length in words.
+        is_first_window: Whether this is the document's first window.
+        is_last_window: Whether this is the document's last window.
+
+    Returns:
+        True if the prediction should be discarded.
+    """
+    if is_first_window and local_word == 0:
+        return True
+    return bool(is_last_window and local_word == n_words)
 
 
 def dedupe(offsets: list[int], tolerance: int) -> list[int]:

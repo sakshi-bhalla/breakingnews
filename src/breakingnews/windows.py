@@ -1,9 +1,7 @@
 """Word/token mapping and sliding-window enumeration.
 
-Ported from `build_dataset.py` and `infer.enumerate_windows`, with the module
-globals replaced by an explicit `Geometry` argument. The mapping must stay
-byte-for-byte equivalent to the training-time version: a break the model saw in
-training has to sit at the same relative position it will see here, or the
+The mapping must match the training-time version exactly: a boundary the model
+saw in training has to sit at the same relative position here, or the
 guard-zone routing no longer matches what the adapter learned.
 """
 
@@ -47,13 +45,29 @@ def word_to_token_index(words: list[str], tokenizer: Any) -> tuple[list[int], in
 
     Args:
         words: The document's words.
-        tokenizer: A fast tokenizer exposing `return_offsets_mapping`.
+        tokenizer: A **fast** tokenizer. Offset mapping is a Rust-backend
+            feature; slow tokenizers cannot produce it.
 
     Returns:
         A `(w2t, n_tokens)` pair. `w2t` has length `len(words) + 1`; the final
         entry is the token count, so `w2t[i:j]` slicing behaves like any other
         half-open range.
+
+    Raises:
+        TypeError: If the tokenizer is not fast. Checked here rather than left
+            to the offset-mapping call, which fails deep in windowing with an
+            error that does not name the cause.
     """
+    if not getattr(tokenizer, "is_fast", False):
+        msg = (
+            f"{type(tokenizer).__name__} is not a fast tokenizer. Window "
+            "geometry is measured in tokens while every offset in this package "
+            "is a word index, and the map between them is built from the "
+            "offset mapping only a fast tokenizer provides. Load with "
+            "AutoTokenizer.from_pretrained(..., use_fast=True)."
+        )
+        raise TypeError(msg)
+
     text = " ".join(words)
     enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     offsets = enc["offset_mapping"]

@@ -16,7 +16,7 @@
       "minLength": 1,
       "description": "Stable unique id. Joins a transcript to its annotation and to predictions. Must be unique within a file.",
       "examples": [
-        "3f7d7b3d9ea1c60f"
+        "0f1e2d3c4b5a6970"
       ]
     },
     "body": {
@@ -40,7 +40,7 @@
       "type": "string",
       "description": "Programme name.",
       "examples": [
-        "CNN ERIN BURNETT OUTFRONT"
+        "EXAMPLE NIGHTLY"
       ]
     },
     "date": {

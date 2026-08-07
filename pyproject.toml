@@ -3,18 +3,21 @@
 # which owns the py-canon [tool.*] blocks, the hatchling + uv-dynamic-versioning
 # backend, and tag-derived versioning. Do not add fleet config here.
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
 
 [project]
 name = "breakingnews"
-version = "0.0.0.dev0"
 description = "Story segmentation for broadcast-news transcripts"
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [{ name = "Sakshi Bhalla" }]
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = []
+# huggingface-hub only: `check-adapter` resolves a Hub id and is advertised
+# as running without the gpu extra. Small, pure-Python, no torch.
+dependencies = ["huggingface-hub>=0.25"]
+dynamic = ["version"]
 
 [project.scripts]
 breakingnews = "breakingnews.cli:main"
@@ -28,7 +31,6 @@ gpu = [
   "transformers>=4.45",
   "peft>=0.13",
   "safetensors>=0.4",
-  "huggingface-hub>=0.25",
   "accelerate>=0.34",
 ]
 
@@ -40,11 +42,13 @@ dev = [
   "codespell",
   { include-group = "test" },
   { include-group = "typing" },
+  "pytest>=8",
 ]
 # The inference stack is an extra for users, but type checking and CI must be
 # able to resolve the lazy `import torch` inside loading.py and segmenter.py.
 typing = ["torch>=2.4", "transformers>=4.45", "peft>=0.13", "safetensors>=0.4"]
 test = ["pytest>=8", "pytest-cov>=6", "jsonschema>=4"]
+docs = ["sphinx>=8", "furo", "myst-parser", "sphinx-copybutton", "py-canon @ git+https://github.com/gojiplus/py-canon@v1"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -53,6 +57,14 @@ testpaths = ["tests"]
 [tool.pyright]
 include = ["src"]
 typeCheckingMode = "standard"
+# Without these, pyright does not resolve the repo's own environment and
+# reports the optional inference imports as missing. Naming the venv makes
+# `pyright src/breakingnews` work however it is invoked, not only under
+# `uv run`.
+# NOTE: `preen adopt` / `copier update` rewrites [tool.pyright]; restore these
+# after any template sync.
+venvPath = "."
+venv = ".venv"
 
 [tool.pydoclint]
 style = "google"
@@ -60,32 +72,36 @@ arg-type-hints-in-docstring = false
 check-return-types = false
 check-class-attributes = false
 allow-init-docstring = true
-exclude = '\.venv|scripts'
-
+exclude = '\.venv|tests|docs'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/breakingnews"]
 
-# scripts/model-training/ is verbatim research code that produced the published
-# numbers. Linting or formatting it would destroy the only property that makes
-# it worth shipping. preen/py-canon will own the rest of [tool.ruff]; this
-# exclusion must survive adoption.
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
 [tool.ruff]
 line-length = 88
+target-version = "py311"
+# scripts/model-training/ is a verbatim copy of the code that produced the
+# published numbers. Linting or formatting it would destroy the only property
+# that makes it worth shipping, so it is excluded on purpose.
+# NOTE: `preen adopt` / `copier update` drops this -- restore it after any sync.
 extend-exclude = ["scripts/model-training"]
 
 [tool.ruff.lint]
-select = [
-  "E", "W", "F", "I", "B", "C4", "UP", "N", "D", "S", "SIM", "T20", "PT", "RUF",
-  "PTH", "RET", "PIE", "FURB", "PERF", "DTZ", "LOG", "G", "TC", "FLY", "RSE",
-  "SLOT", "FA", "A", "EXE", "ICN", "PGH", "PLE", "ARG", "SLF",
-]
-ignore = ["D203", "D213", "W191", "D206", "D300"]
+external = ["DOC"]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "N", "D", "S", "SIM", "T20", "PT", "RUF"]
+ignore = ["D203", "D213", "D206", "D300", "W191"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ARG", "SLF", "S101", "D100", "D101", "D102", "D103"]
+"tests/**" = ["S101", "D"]
+"docs/**" = ["D"]
 "scripts/**" = ["T20"]
 "**/cli.py" = ["T20"]
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"

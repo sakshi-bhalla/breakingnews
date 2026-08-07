@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
@@ -45,7 +44,8 @@ def load_jsonl(path: Path) -> list[dict]:
             try:
                 out.append(json.loads(line))
             except json.JSONDecodeError as exc:
-                sys.exit(f"{path}:{i}: invalid JSON -- {exc}")
+                msg = f"{path}:{i}: invalid JSON -- {exc}"
+                raise SystemExit(msg) from exc
     return out
 
 
@@ -174,7 +174,16 @@ def main() -> int:
         segs = load_jsonl(args.segments)
         n_rec = len({s["record_id"] for s in segs})
         print(f"{len(segs)} segments from {args.segments} ({n_rec} records)")
-        problems += structural(segs, "segment.schema.json", "segment")
+        # `--minimal` is a deliberate four-column projection. Reporting it as
+        # nine missing properties per row buries that in noise.
+        if segs and "word_start" not in segs[0]:
+            print(
+                "  these look like `--minimal` segments (a four-column "
+                "projection); the segment schema describes the full record, so "
+                "structural validation is skipped"
+            )
+        else:
+            problems += structural(segs, "segment.schema.json", "segment")
 
     if problems:
         print(f"\n{len(problems)} problem(s):")

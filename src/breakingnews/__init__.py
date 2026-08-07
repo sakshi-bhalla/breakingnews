@@ -5,12 +5,12 @@ adapter on Llama-3.1-8B-Instruct.
 
     from breakingnews import Segmenter
 
-    seg = Segmenter.from_pretrained("sakshib/breakingnews-v4-hard")
+    seg = Segmenter.from_pretrained("sakshib3/breakingnews", revision="v1")
     breaks = seg.segment(transcript)              # -> [word_offset, ...]
     stories = seg.segment_spans(transcript)       # -> [(start, end), ...]
 
 Boundaries only: nothing here labels, classifies or summarises the resulting
-segments. See LIMITATIONS.md before quoting any accuracy figure.
+segments.
 """
 
 from __future__ import annotations
@@ -34,18 +34,22 @@ from .metrics import (
 from .postprocess import spans
 from .segmenter import Segmenter, WindowScore
 from .segments import (
+    Correspondence,
     Segment,
     drop_flagged,
     group_by_record,
+    id_map,
     make_segment_id,
     merge_segments,
     parse_segment_id,
+    reconcile,
     to_segments,
 )
 
 __all__ = [
     "DEFAULT_BASE_MODEL",
     "DEFAULT_TAU",
+    "Correspondence",
     "DecodeSpec",
     "Geometry",
     "PromptSpec",
@@ -57,12 +61,14 @@ __all__ = [
     "drop_flagged",
     "export_break_token_rows",
     "group_by_record",
+    "id_map",
     "make_segment_id",
     "match",
     "merge_segments",
     "parse_segment_id",
     "pk_and_windowdiff",
     "prf",
+    "reconcile",
     "resolve_adapter",
     "score_documents",
     "spans",

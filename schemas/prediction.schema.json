@@ -57,6 +57,17 @@
     "date": {
       "type": "string",
       "description": "Passed through from the input, if present."
+    },
+    "adapter": {
+      "type": "string",
+      "description": "Adapter the run used, as passed on the command line."
+    },
+    "adapter_revision": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Hub revision the adapter was pinned to, or null for `main`. Null means the weights are not identified: re-running later can load different ones with no error. Pin it for anything whose numbers will be published."
     }
   }
 }

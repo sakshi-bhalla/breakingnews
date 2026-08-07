@@ -7,9 +7,7 @@ affordable, and it is also why localisation can fail: a paraphrased or
 whitespace-mangled anchor may not match. Misses are counted, never silently
 dropped.
 
-Ported from `infer.parse_anchors` / `infer.localize` and
-`build_dataset.locate_anchor`, which training and inference shared so that they
-agreed exactly.
+
 """
 
 from __future__ import annotations

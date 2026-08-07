@@ -1,8 +1,7 @@
 """Segmentation metrics. Pure Python -- no torch, no GPU, no model.
 
-Ported from the research `evaluate.py`, which produced every number in the
-published tables. This module is importable from the base install precisely so
-that scoring a prediction file does not require a 2 GB dependency.
+Importable from the base install, so scoring a prediction file needs no
+GPU dependency.
 
 Three families, measuring different things:
 
@@ -15,10 +14,10 @@ Three families, measuring different things:
 * **Baselines** (`baseline_none`, `baseline_uniform`) -- what a trivial
   predictor scores on the same documents. Without these an F1 means nothing.
 
-Caveat C1 applies to everything here: a large share of scored false positives
+One caveat applies to everything here: a large share of scored false positives
 are real topic changes the annotator grouped into one thematic block, so
-precision is a lower bound. **Do not compute a derived statistic that treats a
-false positive as clean error.**
+precision is a lower bound rather than an estimate. **Do not compute a derived
+statistic that treats a false positive as clean error.**
 """
 
 from __future__ import annotations
@@ -69,7 +68,7 @@ class Score(NamedTuple):
     """Precision, recall and F1.
 
     Attributes:
-        precision: tp / (tp + fp). A **lower bound** under C1, not an estimate.
+        precision: tp / (tp + fp). A **lower bound**, not an estimate.
         recall: tp / (tp + fn).
         f1: Harmonic mean.
         tp: True positives.
@@ -97,12 +96,9 @@ def match(
     vice versa. So two predictions clustered on one true boundary yield one hit
     and one false positive rather than free credit.
 
-    The global ordering matters. Walking gold left-to-right and taking each
+    The global ordering matters: walking gold left-to-right and taking each
     one's nearest free prediction gives identical *counts* but different
-    *pairings* once the tolerance is wide enough for candidates to compete --
-    measured on the published test split, the two agree at +/-25 and +/-50 and
-    diverge at +/-100 (mean offset 12.2 words against 14.8). This is the
-    reference behaviour and reproduces the published tables.
+    *pairings* once the tolerance is wide enough for candidates to compete.
 
     Args:
         gold: Gold boundary offsets.
