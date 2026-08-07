@@ -3,7 +3,7 @@
 Release notes are generated from the GitHub Release for each `vX.Y.Z` tag; this
 file records anything worth curating by hand.
 
-## Unreleased
+## [0.1.0] - 2026-08-06
 
 Nothing released yet. The first release will provide:
 
