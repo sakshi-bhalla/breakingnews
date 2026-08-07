@@ -80,7 +80,7 @@ Re-running can shift a boundary by a few words, because batched bf16 generation 
 
 | split | docs | boundaries | tolerance | precision | recall | **F1** |
 |---|---:|---:|---:|---:|---:|---:|
-| **validation** | 117 | 322 | ±25 w | 0.573 | 0.621 | **0.596** |
+| **validation** | 117 | 322 | ±25 w | 0.573 | 0.621 | 0.596 |
 | validation | 117 | 322 | ±100 w | 0.728 | 0.789 | 0.757 |
 | test | 20 | 64 | ±25 w | 0.593 | 0.797 | 0.680 |
 | test | 20 | 64 | ±100 w | 0.663 | 0.891 | 0.760 |
