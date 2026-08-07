@@ -5,7 +5,7 @@ adapter on Llama-3.1-8B-Instruct.
 
     from breakingnews import Segmenter
 
-    seg = Segmenter.from_pretrained("sakshib3/breakingnews", revision="v1")
+    seg = Segmenter.from_pretrained("sakshib3/Llama-3.1-breakingnews", revision="v1")
     breaks = seg.segment(transcript)              # -> [word_offset, ...]
     stories = seg.segment_spans(transcript)       # -> [(start, end), ...]
 

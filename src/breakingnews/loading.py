@@ -39,7 +39,7 @@ def resolve_adapter(adapter: str | Path, *, revision: str | None = None) -> Path
 
     Args:
         adapter: Either a path to a local adapter directory or a Hugging Face
-            Hub repo id such as `"sakshib3/breakingnews"`.
+            Hub repo id such as `"sakshib3/Llama-3.1-breakingnews"`.
         revision: Hub branch, tag or commit sha to pin. **Leaving this None
             fetches `main`, which moves.** A published result should name a
             revision: without one, re-running the same package version a year
@@ -60,7 +60,7 @@ def resolve_adapter(adapter: str | Path, *, revision: str | None = None) -> Path
         msg = (
             f"adapter directory not found: {adapter}. A Hub repo id is treated "
             "as one only if it is not path-like, so it must not be absolute or "
-            "start with '.' -- e.g. 'sakshib3/breakingnews'."
+            "start with '.' -- e.g. 'sakshib3/Llama-3.1-breakingnews'."
         )
         raise FileNotFoundError(msg)
 

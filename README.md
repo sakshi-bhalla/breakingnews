@@ -15,10 +15,10 @@ The base install is pure Python. Inference needs the `[gpu]` extra and a GPU wit
 
 ```bash
 # 1. Confirm the adapter is intact before trusting anything it produces.
-breakingnews check-adapter sakshib3/breakingnews --revision v1
+breakingnews check-adapter sakshib3/Llama-3.1-breakingnews --revision v1
 
 # 2. Transcripts -> boundaries.
-breakingnews run sakshib3/breakingnews --revision v1 \
+breakingnews run sakshib3/Llama-3.1-breakingnews --revision v1 \
     --input transcripts.jsonl --out predictions.jsonl
 
 # 3. Boundaries -> one row per story.
@@ -46,7 +46,7 @@ Everything except `run` and `sweep` works without a GPU.
 ```python
 from breakingnews import Segmenter, to_segments, merge_segments
 
-seg = Segmenter.from_pretrained("sakshib3/breakingnews", revision="v1")
+seg = Segmenter.from_pretrained("sakshib3/Llama-3.1-breakingnews", revision="v1")
 breaks = seg.segment(transcript)  # [909, 1333, 2351, ...]
 rows = to_segments(record_id, transcript, breaks, min_words=100)
 merge_segments(rows) == (record_id, transcript)  # byte for byte
@@ -90,8 +90,6 @@ Re-running can shift a boundary by a few words, because batched bf16 generation 
 A prediction counts as correct if it lands within N words of a true boundary: ±25 asks "to within a sentence?", ±100 asks "did it find the seam at all?". Baselines on the same test set are 0.000 for predicting nothing and 0.062 for predicting N boundaries at uniform spacing.
 
 **τ is not a tuning knob.** The confidences are saturated and bimodal — 49% of validation windows above 0.5, 38% below 0.001 — so any value in roughly [0.005, 0.5] gives the same answer, and it exists only to exclude τ = 0, where every window fires. This geometry has no high-precision regime: it cannot exceed precision 0.564 at any threshold, so if your use is sensitive to false boundaries the fix is a different geometry, not a different threshold.
-
-**Where it is unmeasured.** US broadcast news, five outlets, one annotator, no inter-annotator agreement, single seed. Behaviour on print, other outlets, other languages or non-news speech is not "probably fine" — it is unmeasured. If your domain differs, build a gold set ([`schemas/`](schemas/)) and measure.
 
 ## Training
 
