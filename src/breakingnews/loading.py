@@ -34,12 +34,17 @@ logger = logging.getLogger(__name__)
 _ROW_KEYS = ("embed_tokens", "lm_head")
 
 
-def resolve_adapter(adapter: str | Path) -> Path:
+def resolve_adapter(adapter: str | Path, *, revision: str | None = None) -> Path:
     """Resolve an adapter reference to a local directory.
 
     Args:
         adapter: Either a path to a local adapter directory or a Hugging Face
-            Hub repo id such as `"sakshib/breakingnews-v4-hard"`.
+            Hub repo id such as `"sakshib3/breakingnews"`.
+        revision: Hub branch, tag or commit sha to pin. **Leaving this None
+            fetches `main`, which moves.** A published result should name a
+            revision: without one, re-running the same package version a year
+            later can load different weights and no error will say so. The
+            resolved revision is logged either way.
 
     Returns:
         A local directory containing the adapter.
@@ -52,13 +57,21 @@ def resolve_adapter(adapter: str | Path) -> Path:
     if path.is_dir():
         return path
     if path.exists() or path.is_absolute() or str(adapter).startswith("."):
-        msg = f"adapter directory not found: {adapter}"
+        msg = (
+            f"adapter directory not found: {adapter}. A Hub repo id is treated "
+            "as one only if it is not path-like, so it must not be absolute or "
+            "start with '.' -- e.g. 'sakshib3/breakingnews'."
+        )
         raise FileNotFoundError(msg)
 
     from huggingface_hub import snapshot_download
 
-    logger.info("fetching adapter %s from the Hub", adapter)
-    return Path(snapshot_download(repo_id=str(adapter)))
+    logger.info(
+        "fetching adapter %s from the Hub at revision %s",
+        adapter,
+        revision or "main (unpinned)",
+    )
+    return Path(snapshot_download(repo_id=str(adapter), revision=revision))
 
 
 def _safetensors_keys(path: Path) -> list[str]:
@@ -300,6 +313,9 @@ def load_model(
         A `(model, tokenizer)` pair, with the model in eval mode.
 
     Raises:
+        RuntimeError: If the model did not fit on the GPU and `device_map`
+            silently offloaded part of it. Detected at load rather than left to
+            surface as a meta-tensor error during generation.
         ValueError: If the adapter's tokenizer does not resolve
             `<|STORY_BREAK|>` to the expected id, which means it is not the
             tokenizer the adapter was trained with. Loading anyway would
@@ -352,6 +368,31 @@ def load_model(
         device_map=device_map,
         attn_implementation=attn_implementation,
     )
+    # `device_map="auto"` does not fail when the GPU is too full -- it offloads
+    # layers to CPU or leaves them on the meta device, and the run continues
+    # until generation dies with "Cannot copy out of meta tensor", which is not
+    # an OOM and which the batch-size backoff cannot fix. Catching it here costs
+    # a dict scan; missing it costs a model load and a confusing error.
+    offloaded = {
+        str(p.device.type)
+        for p in model.parameters()
+        if p.device.type in {"meta", "cpu", "disk"}
+    }
+    if offloaded and device_map == "auto":
+        free = ""
+        if torch.cuda.is_available():
+            free_b, total_b = torch.cuda.mem_get_info()
+            free = (
+                f" GPU has {free_b / 2**30:.1f} GiB free of {total_b / 2**30:.1f} GiB."
+            )
+        msg = (
+            f"the model did not fit on the GPU: some parameters are on "
+            f"{sorted(offloaded)}.{free} Running from here fails later with a "
+            "meta-tensor error that looks like a model problem. Free the GPU, "
+            "or pass device_map explicitly if you intend to offload."
+        )
+        raise RuntimeError(msg)
+
     install_break_token(model, tokenizer, load_break_token_rows(adapter_dir))
     model = PeftModel.from_pretrained(model, str(adapter_dir))
     model.eval()

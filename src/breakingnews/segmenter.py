@@ -4,36 +4,20 @@ The decision to emit a boundary is a **single token** -- `"1"` versus `NONE`.
 Rather than take the argmax, this reads `P("1")` at the decision position and
 fires when it exceeds tau.
 
-**On this model that buys very little, and the library must not claim
-otherwise.** V4_hard's confidences are saturated and bimodal: 49% of validation
-windows sit above 0.5 and 38% below 0.001, with p25 = 0.000 and p75 = 0.996, so
-there is almost nothing in the middle for a threshold to act on. The entire
-500x sweep of tau moves 12% of windows and F1 across that whole range spans
-0.589-0.602. For the w3072 family V4_hard belongs to, `docs/MODELS.md` records
-greedy 0.6250 -> thresholded 0.6250 -- a gain of **0.000**.
+**tau does very little on this model.** Its confidences are saturated and
+bimodal: 49% of validation windows sit above 0.5 and 38% below 0.001, p25 =
+0.000 and p75 = 0.996, so there is almost nothing in the middle for a threshold
+to act on. Sweeping tau over three orders of magnitude moves 12% of windows and
+spans 0.589-0.602 F1. Greedy and thresholded F1 are identical at this geometry.
 
-The frequently quoted "+0.28 F1 from thresholding" (greedy 0.3291 ->
-thresholded 0.6131) belongs to `V2_w2048`, a *different geometry* whose
-confidences are spread. It does not describe this model and must not be
-repeated of it.
+tau exists to exclude tau = 0, where every window fires. It is not a
+precision/recall dial.
 
-Thresholding is still implemented, and greedy is still not offered as a
-default, for three reasons that survive the above: tau = 0 is genuinely harmful
-and must be excludable; the sweep-for-free structure lets a user check on their
-own corpus whether the bimodality holds there too, which is the cheapest
-available test for a domain shift; and a named threshold is auditable in a way
-an implicit argmax is not.
-
-The cheap way to threshold, and what `score_windows` implements: generate
-**once** per window with the decision *forced* to `"1"`, so every window yields
-its anchors regardless of what greedy would have chosen, and read `P("1")` from
-a separate forward pass. The threshold then only decides which windows' outputs
-to keep, which is free. An arbitrary number of thresholds costs one generation
-pass rather than one pass each -- roughly 40x.
-
-This logic previously existed only inside `threshold_sweep.py`'s `main()`,
-welded to argparse and a gold set. Everything importable from the research tree
-(`infer.predict_documents`) was the greedy path.
+`score_windows` generates **once** per window with the decision forced to
+`"1"`, so every window yields its anchors whatever the decision token would
+have been, and reads `P("1")` from a separate forward pass. The threshold then
+only selects which windows to keep, which is free -- any number of thresholds
+costs one generation pass rather than one each, roughly 40x cheaper.
 """
 
 from __future__ import annotations
@@ -45,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from .anchors import localize, parse_anchors
 from .config import DEFAULT_TAU, DecodeSpec, Geometry, PromptSpec
 from .loading import load_model, resolve_adapter
-from .postprocess import dedupe, in_guard_zone, spans
+from .postprocess import dedupe, in_guard_zone, is_degenerate_boundary, spans
 from .windows import Window, enumerate_windows
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -74,6 +58,9 @@ class WindowScore:
         unlocatable: Anchors the model emitted that could not be grounded back
             to a word offset.
         ambiguous: Anchors whose pre-context matched at more than one position.
+        degenerate: Anchors that localised to the very start or very end of the
+            document. Counted rather than silently discarded; see
+            `_score_batch` for why they are dropped.
     """
 
     doc_index: int
@@ -83,6 +70,7 @@ class WindowScore:
     breaks: list[int] = field(default_factory=list)
     unlocatable: int = 0
     ambiguous: int = 0
+    degenerate: int = 0
 
     @property
     def greedy_would_fire(self) -> bool:
@@ -119,7 +107,18 @@ class Segmenter:
             geometry: Window geometry the adapter was trained with.
             prompt: The trained prompt contract. Defaults to the shipped one.
             decode: Decoding options. Defaults to the shipped ones.
+
+        Raises:
+            TypeError: If the tokenizer is not fast. Checked at construction so
+                the failure costs seconds, not the minutes already spent
+                loading a model onto the GPU.
         """
+        if not getattr(tokenizer, "is_fast", False):
+            msg = (
+                f"{type(tokenizer).__name__} is not a fast tokenizer; windowing "
+                "needs its offset mapping to convert word offsets to tokens."
+            )
+            raise TypeError(msg)
         self._model = model
         self._tokenizer = tokenizer
         self.geometry = geometry
@@ -138,6 +137,7 @@ class Segmenter:
         cls,
         adapter: str | Path,
         *,
+        revision: str | None = None,
         base_model: str | Path | None = None,
         geometry: Geometry | None = None,
         prompt: PromptSpec | None = None,
@@ -148,13 +148,18 @@ class Segmenter:
 
         Args:
             adapter: Local adapter directory or Hub repo id.
+            revision: Hub branch, tag or commit sha. Leaving it None fetches
+                `main`, which moves -- pin it for anything whose numbers you
+                intend to publish.
             base_model: Base to load the adapter onto. Defaults to the adapter's
                 recorded base when present locally, else the ungated
                 Llama-3.1-8B-Instruct mirror.
             geometry: Override the adapter's recorded geometry. Intended for
                 experiments; overriding `window_tokens` or `stride_tokens`
                 reintroduces a training/inference mismatch.
-            prompt: Override the trained prompt contract. Rarely correct.
+            prompt: Override the trained prompt contract. Rarely correct --
+                by default the anchor widths are read from the adapter, the
+                same way window geometry is.
             decode: Decoding options.
             **load_kwargs: Forwarded to `loading.load_model` (`dtype`,
                 `device_map`, `attn_implementation`).
@@ -162,13 +167,16 @@ class Segmenter:
         Returns:
             A ready segmenter.
         """
-        adapter_dir = resolve_adapter(adapter)
+        adapter_dir = resolve_adapter(adapter, revision=revision)
         geometry = geometry or Geometry.from_adapter(adapter_dir)
+        # Anchor widths travel with the adapter for the same reason geometry
+        # does: decoding a 24/16 model at the 12/8 default mislocates every
+        # prediction with no error raised.
+        prompt = prompt or PromptSpec.from_adapter(adapter_dir)
         model, tokenizer = load_model(adapter_dir, base_model=base_model, **load_kwargs)
         return cls(model, tokenizer, geometry, prompt=prompt, decode=decode)
 
-    # ── The threshold-free primitive ──────────────────────────────────────────
-
+    # --- The threshold-free primitive ----------------------------------------------
     def score_windows(self, documents: Sequence[str]) -> list[list[WindowScore]]:
         """Score every window of every document, without applying a threshold.
 
@@ -198,8 +206,7 @@ class Segmenter:
             per_doc.sort(key=lambda s: s.word_start)
         return out
 
-    # ── Thresholded convenience API ───────────────────────────────────────────
-
+    # --- Thresholded convenience API -----------------------------------------------
     def segment(self, text: str, *, tau: float = DEFAULT_TAU) -> list[int]:
         """Locate story boundaries in one transcript.
 
@@ -216,22 +223,13 @@ class Segmenter:
         Note:
             Three caveats belong with every call, not in a footnote.
 
-            **C5 -- tau was itself fitted.** 0.010 was selected on the same
-            117-document validation split as everything else, and applying it
-            unchanged to test is the correct protocol but does not make it
-            noise-free.
+            Boundaries only: no topic, story type, or calibrated confidence.
+            `P("1")` is a thresholded logit with no temperature fitting and must
+            not be reported as a probability.
 
-            **C7 -- there is no high-precision regime here.** The geometry
-            V4_hard inherits (`V2_w3072`) cannot exceed precision 0.564 at *any*
-            threshold. If your use is sensitive to false boundaries, raising tau
-            will not deliver it; the fix is a different geometry, not a
-            different threshold.
-
-            **C10 -- boundaries only.** No topic, story type, or calibrated
-            confidence. `P("1")` is a thresholded logit with no temperature
-            fitting and must not be reported as a probability.
-
-            See LIMITATIONS.md for all eleven.
+            This geometry has no high-precision regime -- it cannot exceed
+            precision 0.564 at any threshold. If your use is sensitive to false
+            boundaries, raising tau will not deliver it.
         """
         return self.segment_documents([text], tau=tau)[0]
 
@@ -285,8 +283,7 @@ class Segmenter:
         fired = [o for s in scores if s.p_break > tau for o in s.breaks]
         return dedupe(fired, self.decode.dedupe_tolerance_words)
 
-    # ── Generation ────────────────────────────────────────────────────────────
-
+    # --- Generation ----------------------------------------------------------------
     def _run_pool(self, pool: list[Window]) -> list[WindowScore]:
         """Score a pool of windows, batching across documents.
 
@@ -390,6 +387,24 @@ class Segmenter:
                     guard_fraction=self.geometry.guard_fraction,
                 ):
                     continue
+                # The guard band is deliberately skipped on a document's first
+                # and last window, so nothing else stops an anchor localising
+                # to word 0 or to the word past the end. Both are degenerate --
+                # every document already starts a story, and nothing begins
+                # after the last word -- and both would be rejected downstream
+                # by `to_segments`. Dropping them here keeps that from becoming
+                # an exception in the middle of a corpus run.
+                #
+                # Reachable but rare: zero occurrences across 1,711 documents
+                # of measured output.
+                if is_degenerate_boundary(
+                    hit.offset,
+                    len(window.words),
+                    is_first_window=window.is_first,
+                    is_last_window=window.is_last,
+                ):
+                    score.degenerate += 1
+                    continue
                 score.breaks.append(window.word_start + hit.offset)
             out.append(score)
         return out
@@ -399,9 +414,8 @@ class Segmenter:
 
         Only the final position's logits are needed. Asking for all of them
         materialises a `batch x seq x 128k` tensor -- about 16 GB at batch 16
-        and a 4096-token window -- which, held while `generate` allocates its KV
-        cache, is what forced the research code into two separately freed
-        passes. `logits_to_keep=1` reduces it to a few megabytes.
+        and a 4096-token window. `logits_to_keep=1` reduces it to a few
+        megabytes.
 
         Args:
             prompts: Rendered prompts, unmodified.

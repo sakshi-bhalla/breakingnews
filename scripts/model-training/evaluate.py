@@ -170,23 +170,44 @@ def main():
     gold_by_id = {a["record_id"]: a for a in annotations}
 
     preds = load_jsonl(args.predictions)
-    docs, missing = [], []
-    for p in preds:
-        a = gold_by_id.get(p["record_id"])
-        if a is None:
-            missing.append(p["record_id"])
-            continue
+    by_id = {p["record_id"]: p for p in preds}
+
+    # The SPLIT defines what is being scored, not the prediction file. Iterating
+    # `preds` instead drops any gold document that produced no prediction row
+    # straight out of the denominator, so its misses are never counted - and the
+    # error direction is always favourable. Losing half a prediction file took
+    # F1 from 0.667 to 1.000 with exit 0 and no warning. The asymmetry made it
+    # worse: the reverse case (a prediction with no gold) DID warn, so silence
+    # in this direction read as clean.
+    expected = sorted({r["record_id"] for r in
+                       load_jsonl(C.BUILD_DIR / f"dataset_{args.split}.jsonl")}
+                      & set(gold_by_id))
+    docs, absent = [], []
+    for rid in expected:
+        a = gold_by_id[rid]
+        p = by_id.get(rid)
+        if p is None:
+            absent.append(rid)
         docs.append({
-            "record_id": p["record_id"],
-            "outlet": p.get("outlet") or a["outlet"],
+            "record_id": rid,
+            "outlet": (p.get("outlet") if p else None) or a["outlet"],
             "gold": sorted(a["breaks"]),
-            "pred": sorted(p["pred_breaks"]),
+            "pred": sorted(p["pred_breaks"]) if p else [],
             "word_count": a["word_count"],
         })
 
-    if missing:
-        print(f"[WARN] {len(missing)} predicted docs have no gold annotation; "
+    orphan = [r for r in by_id if r not in gold_by_id]
+    if orphan:
+        print(f"[WARN] {len(orphan)} predicted docs have no gold annotation; "
               f"excluded from scoring.")
+    if absent:
+        lost = sum(len(gold_by_id[r]["breaks"]) for r in absent)
+        print(f"[ERROR] {len(absent)} of {len(expected)} {args.split} documents "
+              f"are ABSENT from the prediction file,\n        holding {lost} gold "
+              f"breaks. They are scored as zero predictions (all misses).\n"
+              f"        If the prediction file is simply incomplete, this number "
+              f"is NOT comparable.")
+        raise SystemExit(2)
 
     n_gold = sum(len(d["gold"]) for d in docs)
     n_pred = sum(len(d["pred"]) for d in docs)

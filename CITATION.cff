@@ -1,11 +1,14 @@
 cff-version: 1.2.0
 title: "breakingnews: story segmentation for broadcast-news transcripts"
-message: "If you use this software, please cite it and read LIMITATIONS.md before quoting any accuracy figure."
+message: "If you use this software, please cite it, and see the README for what the accuracy figures do and do not establish."
 type: software
 authors:
   - family-names: Bhalla
     given-names: Sakshi
 license: MIT
+repository-code: "https://github.com/sakshi-bhalla/breakingnews"
+url: "https://huggingface.co/sakshib3/breakingnews"
+# doi: added after the first Zenodo deposit
 abstract: >-
   A LoRA adapter on Llama-3.1-8B-Instruct that locates the word offsets where
   one story ends and the next begins in a broadcast-news transcript, plus the

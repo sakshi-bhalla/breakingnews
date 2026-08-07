@@ -54,24 +54,24 @@ recall being gamed.
 Transcript:
 
 ```json
-{"record_id": "3f7d7b3d9ea1c60f", "outlet": "CNN", "date": "2012-09-21",
- "show": "CNN ERIN BURNETT OUTFRONT", "type": "dump", "word_count": 6528,
- "body": "ERIN BURNETT, HOST: OUTFRONT next, Mitt Romney ..."}
+{"record_id": "0f1e2d3c4b5a6970", "outlet": "CNN", "date": "2012-09-21",
+ "show": "EXAMPLE NIGHTLY", "type": "dump", "word_count": 6528,
+ "body": "ANCHOR: Good evening. Our top story tonight ..."}
 ```
 
 Annotation:
 
 ```json
-{"record_id": "12791924207105a2", "outlet": "CNN", "date": "2014-10-11",
+{"record_id": "a1b2c3d4e5f60718", "outlet": "CNN", "date": "2014-10-11",
  "show": "CNN MONEY", "word_count": 3607, "category": "A",
  "breaks": [909, 1333, 2351, 2537, 2915, 3184],
- "agent_notes": "Six distinct story segments: Ebola/aviation ..."}
+ "agent_notes": "Six distinct story segments; see notes."}
 ```
 
 A clean transcript:
 
 ```json
-{"record_id": "c0553c39877c525b", "word_count": 2414, "category": "C",
+{"record_id": "9a8b7c6d5e4f3021", "word_count": 2414, "category": "C",
  "breaks": []}
 ```
 
@@ -86,15 +86,36 @@ routes the two categories differently.
 ## Segment identity, and why it is an ordinal
 
 `segment_id` is `{record_id}#{index:03d}`. It encodes no offset on purpose:
-predicted offsets are not bit-reproducible across batch sizes (see
-`LIMITATIONS.md` L1b), so an id derived from an offset — or a hash of the
-segment text — would churn on a re-run that found exactly the same stories. An
-ordinal survives that.
+predicted offsets are not bit-reproducible across batch sizes, so an id
+derived from an offset — or a hash of the segment text — would churn on a
+re-run that found exactly the same stories. An ordinal survives that.
 
 What an ordinal does *not* survive is a re-segmentation that finds a different
-**number** of stories: everything after the change renumbers. If you need to
-reconcile two runs, join on `record_id` plus `word_start` and allow a tolerance,
-not on `segment_id`.
+**number** of stories: everything after the change renumbers. **Do not join two
+runs on `segment_id`** — one extra boundary and every later row silently
+mismatches.
+
+Use `reconcile` instead, which pairs segments by how much text they actually
+share, so it survives both the renumbering and the offset jitter:
+
+```bash
+breakingnews reconcile --old run_a.jsonl --new run_b.jsonl --out map.jsonl
+```
+
+```python
+from breakingnews import reconcile, id_map
+
+pairs = reconcile(old_segments, new_segments)
+id_map(pairs)  # {'rec#001': 'rec#001', ...} -- one-to-one only
+```
+
+Each pairing gets a status: `same` (identical span), `moved` (same story, the
+boundary shifted), `split` / `merged` (the correspondence is not one-to-one),
+`added` / `removed` (no counterpart). Nothing is dropped from either side.
+
+`id_map` returns only `same` and `moved`. A split or merged segment has no
+single successor, and silently choosing one would quietly corrupt any analysis
+carried across the two runs — those cases are yours to look at.
 
 `record_id` is also carried as its own field on every row, so rolling a
 segment-level result back up to the broadcast never requires parsing a string.
@@ -134,7 +155,7 @@ python scripts/validate_data.py transcripts.jsonl annotations.jsonl
 
 The model's measured domain is US broadcast-news transcripts from five
 outlets, labelled by a single annotator with no inter-annotator agreement
-(caveats C8 and C9). Behaviour on print, on other outlets, on other languages
+with no inter-annotator agreement. Behaviour on print, on other outlets, on other languages
 or on non-news speech is unmeasured — not "probably fine", unmeasured. If your
 domain differs, these schemas are what you need to build a training set of
 your own; see `scripts/model-training/`.
@@ -146,8 +167,8 @@ turned out to matter:
   story — new topic, new event, different actors — and explicitly *not* a
   change of speaker, correspondent, location, or sub-angle within a continuing
   story. Most scored false positives in the published evaluation are real topic
-  changes the annotator chose to group into one thematic block (caveat C1), so
-  precision is a lower bound rather than an estimate. Write your rule down
+  changes the annotator chose to group into one thematic block, so precision is a
+  lower bound rather than an estimate. Write your rule down
   before you label, not after.
 - **Placement.** Offsets mark the first word of the new story. Where the
   tease or handoff belongs — to the old story or the new — is a judgement call

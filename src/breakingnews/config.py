@@ -1,16 +1,8 @@
 """Frozen configuration objects.
 
-The research code kept all of this as module-level globals in `config.py`, and
-`infer.apply_saved_geometry()` *rewrote* those globals at load time::
-
-    C.WINDOW_TOKENS = g["window_tokens"]
-    C.STRIDE_TOKENS = g["stride_tokens"]
-
-That is workable in a script and unusable in a library: two adapters with
-different geometry cannot coexist in one process, the mutation leaks between
-tests, and nothing can be constructed twice. Geometry is therefore instance
-state here, carried by the `Segmenter` that read it, and every object in this
-module is frozen.
+Every object here is frozen, and geometry is instance state carried by the
+`Segmenter` that read it. Mutable module-level configuration would mean two
+adapters with different geometry could not coexist in one process.
 """
 
 from __future__ import annotations
@@ -24,20 +16,20 @@ DEFAULT_TAU = 0.010
 
 **This is a guard, not a tuning knob, and specifically not a precision dial.**
 
-V4_hard's confidences are saturated and bimodal: 49% of validation windows sit
+v1's confidences are saturated and bimodal: 49% of validation windows sit
 above 0.5 and 38% below 0.001, p25 = 0.000 and p75 = 0.996. The entire 500x
 sweep of tau moves 12% of windows; F1 across that whole range spans 0.589-0.602
-and precision 0.548-0.583. For the w3072 family, `docs/MODELS.md` records greedy
-and thresholded F1 identical at 0.6250.
+and precision 0.548-0.583. For this geometry the project model log records
+greedy and thresholded F1 identical at 0.6250.
 
 The one place tau matters is zero, where every window fires and F1 collapses. So
 any value in roughly [0.005, 0.5] is equivalent, and the parameter exists to
 exclude that degenerate case.
 
-**Caveat C7 belongs anywhere tau is exposed.** The deployed geometry has no
-high-precision regime: `V2_w3072` cannot exceed precision 0.564 at *any*
-threshold, while `V2_w2048` -- same peak F1, confidences better spread --
-reaches 0.810. A downstream use sensitive to false boundaries cannot be served
+**This belongs anywhere tau is exposed.** The deployed 3072-token geometry
+has no high-precision regime: it cannot exceed precision 0.564 at *any*
+threshold, while a 2048-token variant -- same peak F1, confidences better
+spread -- reaches 0.810. A downstream use sensitive to false boundaries cannot be served
 by raising tau on this model. The fix is a different geometry.
 
 0.010 is the default because it produced the published numbers.
@@ -55,7 +47,8 @@ BREAK_TOKEN_ID = 128256
 """Vocabulary index of `<|STORY_BREAK|>` after the base model is resized.
 
 Llama-3.1's stock vocabulary is 128,256 entries (0..128,255), so the added
-token lands at exactly this index. `test_artifacts` asserts it.
+token lands at exactly this index. `load_model` refuses a tokenizer that
+resolves it anywhere else.
 """
 
 ROWS_FILENAME = "story_break_rows.safetensors"
@@ -103,6 +96,35 @@ class PromptSpec:
         "Transcript:\n{input_text}\n\nBoundaries:\n"
     )
 
+    @classmethod
+    def from_adapter(cls, adapter_dir: str | Path, **overrides: object) -> PromptSpec:
+        """Read the anchor widths the adapter was trained with.
+
+        Anchor lengths are part of the trained contract exactly as window
+        geometry is, and they travel the same way. A model taught to quote 24
+        words before a boundary and 16 after, decoded with the 12/8 default,
+        parses its own output at the wrong widths and mislocates every
+        prediction -- silently, and looking like a bad model rather than a
+        mismatched harness.
+
+        Adapters trained before the fields existed omit them. Their value **is**
+        12/8, so the fallback is a fact about those runs rather than a guess.
+
+        Args:
+            adapter_dir: A resolved local adapter directory.
+            **overrides: Fields to override after loading.
+
+        Returns:
+            The prompt contract for this adapter.
+        """
+        path = Path(adapter_dir) / "segmentation_config.json"
+        saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        return cls(
+            anchor_pre_words=saved.get("anchor_pre_words", 12),
+            anchor_post_words=saved.get("anchor_post_words", 8),
+            **overrides,  # type: ignore[arg-type]
+        )
+
     def render(self, window_text: str) -> str:
         """Build the prompt for one window.
 
@@ -127,7 +149,7 @@ class Geometry:
     """Window geometry, read from the adapter rather than from a default.
 
     Geometry travels with the adapter because it is a property of how the model
-    was trained, not of how a caller wants to run it. V4_hard was trained at
+    was trained, not of how a caller wants to run it. v1 was trained at
     3072/1536 with a 200-token guard; the research `config.py` defaulted to
     4096/3072/400. Running the adapter at the defaults silently feeds it slices
     unlike anything in training and costs real accuracy, with no error raised.
@@ -144,14 +166,11 @@ class Geometry:
         guard_fraction: Fraction of a window's words discarded at each edge at
             inference time.
 
-            This is deliberately *not* derived from `edge_guard_lo`. The
-            research `in_guard_zone()` hardcoded `0.10 * n_words` and ignored
-            the `edge_guard_lo` that `apply_saved_geometry()` had just loaded,
-            so inference discarded a wider band (10%) than training clipped for
-            (200/3072 = 6.5%). Every number in `results/` was produced with
-            10%, so 10% is the default here and changing it invalidates the
-            published metrics. It is exposed because narrowing it is a
-            plausible free-recall experiment, not because it is a preference.
+            Deliberately *not* derived from `edge_guard_lo`: inference
+            discards a wider band (10% of words) than training clipped for
+            (200/3072 = 6.5%). Every published number was produced at 10%, so
+            10% is the default and changing it invalidates them. It is exposed
+            because narrowing it to match training is a plausible experiment.
     """
 
     window_tokens: int
@@ -251,13 +270,10 @@ class DecodeSpec:
             than one position in the window is discarded as ambiguous rather
             than resolved to the first match.
 
-            Defaults to False, which reproduces the published numbers.
-            `locate_anchor()` in the research code contained a dead ambiguity
-            check -- both branches returned `hits[0]` -- so multi-match anchors
-            have always silently taken the first hit. The rate is expected to
-            be low (12 pre-context words are unique for 99.93% of annotated
-            breaks) but it has never been measured; `WindowScore.ambiguous`
-            counts it so it can be.
+            Defaults to False, which reproduces the published numbers: a
+            multi-match anchor takes its first hit. The rate should be low --
+            12 pre-context words are unique for 99.93% of annotated breaks --
+            and `WindowScore.ambiguous` counts it so it can be measured.
     """
 
     max_new_tokens: int = 256
