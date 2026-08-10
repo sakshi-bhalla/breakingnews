@@ -6,8 +6,6 @@ authors:
   - family-names: Bhalla
     given-names: Sakshi
     orcid: "https://orcid.org/0000-0002-6803-7657"
-  - family-names: Sood
-    given-names: Gaurav
 license: MIT
 repository-code: "https://github.com/sakshi-bhalla/breakingnews"
 url: "https://huggingface.co/sakshib3/Llama-3.1-breakingnews"
