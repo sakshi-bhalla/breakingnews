@@ -4,11 +4,6 @@ A broadcast-news transcript arrives as an undifferentiated block of 2,000–17,0
 
 These pages are the API reference. For installation, the command-line workflow, and the accuracy figures with what they do and do not establish, see the [README](https://github.com/sakshi-bhalla/breakingnews#readme).
 
-```{contents}
-:local:
-:depth: 1
-```
-
 ## Segmenting
 
 The entry point. `score_windows` is the threshold-free primitive; `apply_threshold` is free to re-run, which is what makes a tau sweep cheap.
