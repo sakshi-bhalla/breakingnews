@@ -20,3 +20,8 @@ jobs:
     with:
       wheel-import: breakingnews
       coverage-floor: 0
+      # py-canon defaults to ["3.11", "3.14"], but this project caps at <3.14
+      # because the gpu extra needs torch, which has no 3.14 wheels. The 3.14
+      # leg therefore fails at `uv sync`, not at anything we wrote. Track the
+      # real ceiling instead, and raise it when torch ships 3.14.
+      python-versions: '["3.11", "3.13"]'

@@ -24,6 +24,12 @@ license-files = ["LICENSE"]
 dependencies = ["huggingface-hub>=0.25"]
 dynamic = ["version"]
 
+[project.urls]
+Homepage = "https://github.com/sakshi-bhalla/breakingnews"
+Issues = "https://github.com/sakshi-bhalla/breakingnews/issues"
+"Model weights" = "https://huggingface.co/sakshib3/Llama-3.1-breakingnews"
+"Author website" = "https://sakshi-bhalla.github.io"
+
 [project.scripts]
 breakingnews = "breakingnews.cli:main"
 

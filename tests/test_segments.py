@@ -138,6 +138,12 @@ class TestRoundTrip:
         assert rebuilt == MESSY
         assert rebuilt != " ".join(MESSY.split())  # the naive version differs
 
+    def test_an_empty_record_without_text_still_merges(self):
+        # The mirror of the whitespace case: a zero-length span carries no
+        # characters to lose, so joining nothing IS exact and refusing here
+        # would be wrong.
+        assert merge_segments(to_segments("r", "", [], include_text=False)) == ("r", "")
+
     def test_merge_accepts_segments_in_any_order(self):
         segs = to_segments("r", BODY, [3, 7])
         assert merge_segments(list(reversed(segs)))[1] == BODY
@@ -163,6 +169,15 @@ class TestMergeRefusals:
 
     def test_segments_without_text(self):
         segs = to_segments("r", BODY, [3], include_text=False)
+        with pytest.raises(ValueError, match="carry no text"):
+            merge_segments(segs)
+
+    def test_a_whitespace_only_record_without_text(self):
+        # Splits to zero words, so a guard keyed on n_words exempts it and the
+        # merge returns "" for a record whose body was "   " -- a truncated
+        # document reported as a success, which is the one thing merge exists
+        # to prevent.
+        segs = to_segments("r", "   ", [], include_text=False)
         with pytest.raises(ValueError, match="carry no text"):
             merge_segments(segs)
 

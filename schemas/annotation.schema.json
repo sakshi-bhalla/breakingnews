@@ -40,8 +40,8 @@
     },
     "word_count": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Must equal the matching transcript's `word_count`. This is the guard that catches an annotation made against a different revision of the text -- the single most damaging silent error in this pipeline."
+      "minimum": 0,
+      "description": "Must equal the matching transcript's `word_count`. This is the guard that catches an annotation made against a different revision of the text -- the single most damaging silent error in this pipeline. Zero is legal, matching a transcript with no words."
     },
     "category": {
       "enum": [

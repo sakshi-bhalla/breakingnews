@@ -153,25 +153,24 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
                 continue
             for d, per_doc in zip(chunk, scored, strict=True):
-                f.write(
-                    json.dumps(
-                        {
-                            "record_id": d["record_id"],
-                            "outlet": d.get("outlet"),
-                            "date": d.get("date"),
-                            "word_count": len(d["body"].split()),
-                            "pred_breaks": seg.apply_threshold(per_doc, tau=args.tau),
-                            "tau": args.tau,
-                            "adapter": str(args.adapter),
-                            "adapter_revision": args.revision,
-                            "n_unlocatable_anchors": sum(
-                                s.unlocatable for s in per_doc
-                            ),
-                            "n_ambiguous_anchors": sum(s.ambiguous for s in per_doc),
-                        }
-                    )
-                    + "\n"
-                )
+                row = {
+                    "record_id": d["record_id"],
+                    "word_count": len(d["body"].split()),
+                    "pred_breaks": seg.apply_threshold(per_doc, tau=args.tau),
+                    "tau": args.tau,
+                    "adapter": str(args.adapter),
+                    "adapter_revision": args.revision,
+                    "n_unlocatable_anchors": sum(s.unlocatable for s in per_doc),
+                    "n_ambiguous_anchors": sum(s.ambiguous for s in per_doc),
+                }
+                # Copied through only when the input carries them. The schema
+                # types these as strings, so emitting an explicit null makes the
+                # tool's own output fail its own schema; `show` was documented
+                # but never written at all.
+                for key in ("outlet", "show", "date"):
+                    if d.get(key) is not None:
+                        row[key] = d[key]
+                f.write(json.dumps(row) + "\n")
                 written += 1
             print(f"  {written}/{len(docs)} documents", flush=True)
 
@@ -461,8 +460,11 @@ def cmd_segments(args: argparse.Namespace) -> int:
     if args.no_text:
         print("text omitted: offsets only, so `merge` cannot rebuild from these")
     if args.minimal:
+        # --no-text already removed `text`, so naming four columns here would
+        # announce a column the file does not have.
+        written_cols = [c for c in minimal if c != "text" or not args.no_text]
         print(
-            "minimal columns: record_id, segment_id, text, n_cuts. Offsets are "
+            f"minimal columns: {', '.join(written_cols)}. Offsets are "
             "dropped,\nso `merge` and `reconcile` cannot read this file -- keep a "
             "full copy if you\nwill need either."
         )

@@ -21,13 +21,12 @@
     },
     "body": {
       "type": "string",
-      "minLength": 1,
-      "description": "The full transcript as one string. Word offsets are indices into `body.split()`, so any change to whitespace invalidates every annotation and prediction for this record."
+      "description": "The full transcript as one string. Word offsets are indices into `body.split()`, so any change to whitespace invalidates every annotation and prediction for this record. An empty or whitespace-only body is permitted rather than rejected: a failed scrape is a real record with zero words, and the pipeline carries it through as an uncut record instead of dropping it silently."
     },
     "word_count": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Must equal `len(body.split())` exactly. Checked at load; a mismatch is a hard error, not a warning, because it silently shifts every offset."
+      "minimum": 0,
+      "description": "Must equal `len(body.split())` exactly. Checked at load; a mismatch is a hard error, not a warning, because it silently shifts every offset. Zero is legal and means the record has no words at all."
     },
     "outlet": {
       "type": "string",

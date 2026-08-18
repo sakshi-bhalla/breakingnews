@@ -174,11 +174,14 @@ def make_segment_id(record_id: str, index: int) -> str:
         index: Position within the broadcast, from 0.
 
     Returns:
-        `"{record_id}#{index:03d}"`.
+        ``"{record_id}#{index:03d}"``. Double backticks are load-bearing:
+        Napoleon splits a Returns line on its first colon into type and
+        description, and a single-backtick literal does not protect the colon
+        in the format spec.
 
     Raises:
-        ValueError: If `record_id` contains the separator, which would make the
-            id ambiguous to parse.
+        ValueError: If ``record_id`` contains the separator, which would make
+            the id ambiguous to parse.
     """
     if SEGMENT_ID_SEPARATOR in record_id:
         msg = (
@@ -349,7 +352,10 @@ def merge_segments(segments: Sequence[Segment]) -> tuple[str, str]:
             f"0..{len(ordered) - 1}; segments are missing or duplicated"
         )
         raise ValueError(msg)
-    if any(not s.text and s.n_words for s in ordered):
+    # Keyed on span length, not word count: a whitespace-only record splits to
+    # zero words, so an `n_words` test would exempt it, and the empty joins
+    # below would then return a truncated body as a success.
+    if any(not s.text and s.char_end > s.char_start for s in ordered):
         msg = (
             f"{record_id}: segments carry no text (built with include_text="
             "False), so the document cannot be reassembled from them"

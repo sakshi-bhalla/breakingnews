@@ -18,8 +18,8 @@
     },
     "word_count": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Length of the transcript this was predicted from, in words. Lets a consumer verify the prediction was made against the same text they hold."
+      "minimum": 0,
+      "description": "Length of the transcript this was predicted from, in words. Lets a consumer verify the prediction was made against the same text they hold. Zero is legal and always carries an empty `pred_breaks`."
     },
     "pred_breaks": {
       "type": "array",
