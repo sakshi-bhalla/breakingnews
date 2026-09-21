@@ -10,7 +10,7 @@ pip install breakingnews          # scoring, segments, merge, reconcile
 pip install "breakingnews[gpu]"   # + torch/transformers/peft, for inference
 ```
 
-The base install is pure Python. Inference needs the `[gpu]` extra and a GPU with at least 24 GB; the adapter is fetched from the Hugging Face Hub on first use and cached, and the Llama-3.1-8B base is a further ~16 GB download. Built with Llama.
+The base install is pure Python. Inference needs the `[gpu]` extra and a GPU with at least 24 GB; the adapter is fetched from the Hugging Face Hub on first use and cached, and the Llama-3.1-8B base is a further ~16 GB download. 
 
 ## The workflow
 
