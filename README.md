@@ -1,7 +1,6 @@
 # breakingnews
 [![CI](https://github.com/sakshi-bhalla/breakingnews/actions/workflows/ci.yml/badge.svg)](https://github.com/sakshi-bhalla/breakingnews/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/breakingnews)](https://pypi.org/project/breakingnews/)
-[![Python](https://img.shields.io/pypi/pyversions/breakingnews)](https://pypi.org/project/breakingnews/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21863477.svg)](https://doi.org/10.5281/zenodo.21863477)
 [![Docs](https://img.shields.io/badge/docs-github%20pages-blue)](https://sakshi-bhalla.github.io/breakingnews/)
