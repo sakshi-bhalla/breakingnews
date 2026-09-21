@@ -62,8 +62,18 @@ test = ["pytest>=8", "pytest-cov>=6", "jsonschema>=4"]
 docs = ["sphinx>=8", "furo", "myst-parser", "sphinx-copybutton", "py-canon @ git+https://github.com/gojiplus/py-canon@v1"]
 
 [tool.pytest.ini_options]
+minversion = "8.0"
 pythonpath = ["src"]
 testpaths = ["tests"]
+log_level = "INFO"
+# An xfail that starts passing is a fixed bug nobody noticed; fail on it so the
+# marker gets removed rather than quietly masking a now-working case.
+xfail_strict = true
+# --strict-config: a typo in this table is an error, not a silent default.
+# --strict-markers: an unregistered marker is a typo'd filter, not a new marker.
+# -ra: summarise every non-passing outcome, so skips do not vanish from the log.
+addopts = "--strict-config --strict-markers -ra"
+filterwarnings = ["error"]
 
 [tool.pyright]
 include = ["src"]
@@ -116,3 +126,15 @@ convention = "google"
 [tool.uv-dynamic-versioning]
 vcs = "git"
 style = "pep440"
+
+[tool.preen]
+# Deviations from the py-canon fleet standard that are deliberate, recorded
+# here so `preen check --strict` stops failing CI on choices already made.
+#
+# metadata: two findings, both intentional. The build backend is hatchling +
+#   uv-dynamic-versioning rather than uv_build, and requires-python carries a
+#   `<3.14` upper bound because the gpu extra needs torch, which has no 3.14
+#   wheels. Drop this skip once torch ships 3.14 and the backend is migrated.
+# workflows: dependabot-auto-merge.yml is a local copy rather than a caller to
+#   py-canon's reusable workflow. Revisit if the local copy stops being needed.
+skip_checks = ["metadata", "workflows"]
