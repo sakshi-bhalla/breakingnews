@@ -1,4 +1,11 @@
 # breakingnews
+[![CI](https://github.com/sakshi-bhalla/breakingnews/actions/workflows/ci.yml/badge.svg)](https://github.com/sakshi-bhalla/breakingnews/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/breakingnews)](https://pypi.org/project/breakingnews/)
+[![Python](https://img.shields.io/pypi/pyversions/breakingnews)](https://pypi.org/project/breakingnews/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21863477.svg)](https://doi.org/10.5281/zenodo.21863477)
+[![Docs](https://img.shields.io/badge/docs-github%20pages-blue)](https://sakshi-bhalla.github.io/breakingnews/)
+[![Model](https://img.shields.io/badge/%F0%9F%A4%97%20Model-Llama--3.1--breakingnews-yellow)](https://huggingface.co/sakshib3/Llama-3.1-breakingnews)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/breakingnews?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/breakingnews) 
 <br>
 **Purpose.** A broadcast-news transcript arrives as an undifferentiated block of 2,000–17,000 words covering several unrelated stories. This package finds the word offsets where one story ends and the next begins, turns them into one row per story, and lets you put the rows back together again. It exists because content analysis needs a comparable unit: a television transcript is not one article, and treating it as one — or splitting it on speaker turns — gives the wrong denominator. A "boundary" means the broadcast moves to a **genuinely different story**: new topic, new event, different actors, and explicitly *not* a change of speaker, correspondent, location or sub-angle within a continuing story. Boundaries only — nothing here labels, classifies or summarises the segments it produces.
