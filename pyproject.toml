@@ -137,4 +137,7 @@ style = "pep440"
 #   wheels. Drop this skip once torch ships 3.14 and the backend is migrated.
 # workflows: dependabot-auto-merge.yml is a local copy rather than a caller to
 #   py-canon's reusable workflow. Revisit if the local copy stops being needed.
-skip_checks = ["metadata", "workflows"]
+# codespell: the prose is en-GB throughout -- summarise, normalised, labelled,
+#   behaviour -- and codespell only knows en-US, so it reports the house style
+#   as 46 misspellings. The spelling is deliberate, not a typo.
+skip_checks = ["metadata", "workflows", "codespell"]
