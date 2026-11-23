@@ -141,3 +141,8 @@ style = "pep440"
 #   behaviour -- and codespell only knows en-US, so it reports the house style
 #   as 46 misspellings. The spelling is deliberate, not a typo.
 skip_checks = ["metadata", "workflows", "codespell"]
+
+# soupsieve (docs-only, via furo) is patched only in releases that need 3.11.5.
+# Scoped to the docs group: the package itself still supports every 3.11.x.
+[tool.uv.dependency-groups]
+docs = { requires-python = ">=3.11.5" }
